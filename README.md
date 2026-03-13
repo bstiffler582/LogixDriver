@@ -4,7 +4,9 @@ A .NET library for communicating with Allen-Bradley/Rockwell ControlLogix PLCs o
 
 ## Installation
 
-Add the NuGet package to your project:
+- Download the package from the <a href="/release/">release</a> folder
+- Put it in a local nuget package source
+- Add to your project
 
 ```
 dotnet add package LogixDriver
