@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LogixDriver", "LogixDriver.csproj", "{9B024DA6-82BC-41F6-A391-52E69653CBBD}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LogixDriver", "LogixDriver\LogixDriver.csproj", "{9B024DA6-82BC-41F6-A391-52E69653CBBD}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ConsoleTest", "ConsoleTest\ConsoleTest.csproj", "{EE06DCC7-CC5C-4E79-BE9F-33508039FFFC}"
 EndProject

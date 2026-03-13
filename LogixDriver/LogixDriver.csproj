@@ -9,10 +9,10 @@
 
   <PropertyGroup>
     <PackageId>LogixDriver</PackageId>
-    <AssemblyVersion>1.0.0</AssemblyVersion>
+    <AssemblyVersion>0.1.7</AssemblyVersion>
     <Version>$(AssemblyVersion)</Version>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <PackageOutputPath>./release</PackageOutputPath>
+    <PackageOutputPath>../release</PackageOutputPath>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -22,6 +22,12 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <DebugType>embedded</DebugType>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="ConsoleTest\**" />
+    <EmbeddedResource Remove="ConsoleTest\**" />
+    <None Remove="ConsoleTest\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="libplctag" Version="1.5.2" />
