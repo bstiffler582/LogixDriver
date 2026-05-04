@@ -6,6 +6,7 @@ namespace Logix.Tags
     {
         public void AddTag(string tagPath, Tag tag);
         public bool TryGetTag(string tagPath, out Tag? tag);
+        public void Flush();
     }
 
     internal class TagCache : ITagCache
@@ -20,6 +21,16 @@ namespace Logix.Tags
         public bool TryGetTag(string tagPath, out Tag? tag)
         {
             return tagCache.TryGetValue(tagPath, out tag);
+        }
+
+        public void Flush()
+        {
+            foreach (var tag in tagCache.Values)
+            {
+                tag.Dispose();
+            }
+
+            tagCache.Clear();
         }
     }
 }

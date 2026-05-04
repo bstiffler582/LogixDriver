@@ -228,6 +228,8 @@ namespace Logix.Driver
 
         public void Dispose()
         {
+            isConnected = false;
+            tagCache?.Flush();
             channel?.Dispose();
         }
     }
