@@ -9,7 +9,7 @@
 
   <PropertyGroup>
     <PackageId>LogixDriver</PackageId>
-    <AssemblyVersion>0.1.10</AssemblyVersion>
+    <AssemblyVersion>0.1.11</AssemblyVersion>
     <Version>$(AssemblyVersion)</Version>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageOutputPath>../release</PackageOutputPath>
@@ -31,7 +31,6 @@
 
   <ItemGroup>
     <PackageReference Include="libplctag" Version="1.5.2" />
-    <PackageReference Include="libplctag.NativeImport" Version="1.0.41" />
   </ItemGroup>
 
 </Project>
