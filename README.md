@@ -4,7 +4,7 @@ A .NET library for communicating with Allen-Bradley/Rockwell ControlLogix PLCs o
 
 ## Installation
 
-- Download the package from the <a href="/release/">release</a> folder
+- Download the latest [release](https://github.com/bstiffler582/LogixDriver/releases)
 - Put it in a local nuget package source
 - Add to your project
 
@@ -72,6 +72,7 @@ using Logix.Driver;
 var target = new Target("MyPLC", "192.168.1.10", "1,0");
 
 var driver = Driver.Create(target);
+driver.ConnectionStateChanged += (_, e) => Console.WriteLine("Connected:" + e.IsConnected);
 
 if (driver.TryConnect())
 {
