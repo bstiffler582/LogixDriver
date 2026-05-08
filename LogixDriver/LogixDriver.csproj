@@ -9,9 +9,9 @@
 
   <PropertyGroup>
     <PackageId>LogixDriver</PackageId>
-    <AssemblyVersion>0.1.13</AssemblyVersion>
+    <AssemblyVersion>0.1.4</AssemblyVersion>
     <Version>$(AssemblyVersion)</Version>
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <PackageOutputPath>../release</PackageOutputPath>
     <PackageProjectUrl>https://github.com/bstiffler582/LogixDriver</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>

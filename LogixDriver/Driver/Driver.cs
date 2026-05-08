@@ -75,58 +75,6 @@ namespace Logix.Driver
             }
         }
 
-        private void SetConnectionState(bool connected)
-        {
-            lock (stateLock)
-            {
-                if (isConnected == connected)
-                    return;
-
-                channel?.Dispose();
-                channel = connected ? channelFactory?.Open(tagFactory, QUEUE_INTERVAL_MS) : null;
-                isConnected = connected;
-
-                StopHeartbeat();
-                if (connected && Target.HeartbeatInterval > TimeSpan.Zero)
-                    StartHeartbeat();
-            }
-
-            ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected));
-        }
-
-        private void StartHeartbeat()
-        {
-            heartbeatCts = new CancellationTokenSource();
-            var token = heartbeatCts.Token;
-            var interval = Target.HeartbeatInterval;
-            heartbeatTask = Task.Run(() => HeartbeatLoopAsync(interval, token));
-        }
-
-        private void StopHeartbeat()
-        {
-            heartbeatCts?.Cancel();
-            heartbeatCts?.Dispose();
-            heartbeatCts = null;
-            heartbeatTask = null;
-        }
-
-        private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken token)
-        {
-            using var timer = new PeriodicTimer(interval);
-            try
-            {
-                while (await timer.WaitForNextTickAsync(token))
-                {
-                    if (string.IsNullOrEmpty(ReadControllerInfo(true)))
-                    {
-                        SetConnectionState(false);
-                        return;
-                    }
-                }
-            }
-            catch (OperationCanceledException) { }
-        }
-
         public async Task LoadTagsAsync(IEnumerable<string>? tagFilter = null)
         {
             await metaProvider.LoadTagDefinitionsAsync(tagFilter);
@@ -239,12 +187,13 @@ namespace Logix.Driver
             }
         }
 
-        private bool CheckTagIsDisconnected(Tag tag) =>
+        private static bool CheckTagIsDisconnected(Tag tag) =>
             tag.GetStatus() switch
             {
                 Status.ErrorBadConnection => true,
                 Status.ErrorTimeout => true,
                 Status.ErrorWinsock => true,
+                Status.Pending => true,
                 _ => false
             };
 
@@ -315,7 +264,7 @@ namespace Logix.Driver
             return (definition, tag);
         }
 
-        private string ResolveArrayPath(string tagName, TagDefinition definition)
+        private static string ResolveArrayPath(string tagName, TagDefinition definition)
         {
             var member = definition;
             var path = tagName;
@@ -326,6 +275,59 @@ namespace Logix.Driver
             }
 
             return path;
+        }
+
+        // connection state management
+        private void SetConnectionState(bool connected)
+        {
+            lock (stateLock)
+            {
+                if (isConnected == connected)
+                    return;
+
+                channel?.Dispose();
+                channel = connected ? channelFactory?.Open(tagFactory, QUEUE_INTERVAL_MS) : null;
+                isConnected = connected;
+
+                StopHeartbeat();
+                if (connected && Target.HeartbeatInterval > TimeSpan.Zero)
+                    StartHeartbeat();
+            }
+
+            ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected));
+        }
+
+        private void StartHeartbeat()
+        {
+            heartbeatCts = new CancellationTokenSource();
+            var token = heartbeatCts.Token;
+            var interval = Target.HeartbeatInterval;
+            heartbeatTask = Task.Run(() => HeartbeatLoopAsync(interval, token));
+        }
+
+        private void StopHeartbeat()
+        {
+            heartbeatCts?.Cancel();
+            heartbeatCts?.Dispose();
+            heartbeatCts = null;
+            heartbeatTask = null;
+        }
+
+        private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken token)
+        {
+            using var timer = new PeriodicTimer(interval);
+            try
+            {
+                while (await timer.WaitForNextTickAsync(token))
+                {
+                    if (string.IsNullOrEmpty(ReadControllerInfo(true)))
+                    {
+                        SetConnectionState(false);
+                        return;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
         }
 
         public void Dispose()
