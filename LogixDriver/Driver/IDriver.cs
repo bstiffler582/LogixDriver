@@ -16,5 +16,12 @@ namespace Logix.Driver
         public void WriteTagValue(string tagName, object value);
         public Task WriteTagValueAsync(string tagName, object value);
         public bool TryConnect();
+        public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
+    }
+
+    public class ConnectionStateChangedEventArgs : EventArgs
+    {
+        public bool IsConnected { get; }
+        public ConnectionStateChangedEventArgs(bool isConnected) => IsConnected = isConnected;
     }
 }

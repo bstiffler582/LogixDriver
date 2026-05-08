@@ -9,7 +9,6 @@ namespace Logix.Tags
         public TagDefinition DecodeTagMeta(Tag tag, int offset, out int elementSize);
         public TypeDefinition DecodeUdtMeta(Tag tag);
         public IEnumerable<TagDefinition> DecodeTagList(Tag tag);
-        public string DecodeControllerInfo(Tag tag);
     }
 
     internal class TagMetaDecoder : ITagMetaDecoder
@@ -120,7 +119,7 @@ namespace Logix.Tags
             return new TypeDefinition(udtInfo.Id, udtInfo.Size, udtInfo.Name, members);
         }
 
-        public string DecodeControllerInfo(Tag tag)
+        public static string DecodeControllerInfo(Tag tag)
         {
             var buffer = tag.GetBuffer();
 

@@ -9,10 +9,12 @@
 
   <PropertyGroup>
     <PackageId>LogixDriver</PackageId>
-    <AssemblyVersion>0.1.11</AssemblyVersion>
+    <AssemblyVersion>0.1.13</AssemblyVersion>
     <Version>$(AssemblyVersion)</Version>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageOutputPath>../release</PackageOutputPath>
+    <PackageProjectUrl>https://github.com/bstiffler582/LogixDriver</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -27,6 +29,13 @@
     <Compile Remove="ConsoleTest\**" />
     <EmbeddedResource Remove="ConsoleTest\**" />
     <None Remove="ConsoleTest\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

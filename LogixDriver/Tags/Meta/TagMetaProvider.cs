@@ -1,5 +1,4 @@
-﻿using Logix.Driver;
-using static Logix.Tags.TagMetaHelpers;
+﻿using static Logix.Tags.TagMetaHelpers;
 
 namespace Logix.Tags
 {
