@@ -22,6 +22,7 @@ namespace Logix.Driver
 
         private CancellationTokenSource? heartbeatCts;
         private Task? heartbeatTask;
+        private readonly SemaphoreSlim heartbeatWake = new(0, 1);
         private readonly object stateLock = new();
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
 
@@ -107,11 +108,11 @@ namespace Logix.Driver
                 tag = channel.Reader.ReadTag(tag);
                 return valueResolver.ResolveValue(tag, definition);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag))
+                if (CheckTagIsDisconnected(tag, ex.Message))
                 {
-                    SetConnectionState(false);
+                    NotifyDisconnect();
                     return null;
                 }
                 else throw;
@@ -122,7 +123,7 @@ namespace Logix.Driver
         {
             if (!isConnected || channel is null)
                 return null;
-            
+
             var (definition, tag) = GetTag(tagName);
 
             try
@@ -130,11 +131,11 @@ namespace Logix.Driver
                 tag = await channel.Reader.ReadTagAsync(tag);
                 return valueResolver.ResolveValue(tag, definition);
             }
-            catch (Exception)
-            {       
-                if (CheckTagIsDisconnected(tag))
+            catch (Exception ex)
+            {
+                if (CheckTagIsDisconnected(tag, ex.Message))
                 {
-                    SetConnectionState(false); 
+                    NotifyDisconnect();
                     return null;
                 }
                 else throw;
@@ -156,10 +157,10 @@ namespace Logix.Driver
                 valueResolver.WriteTagBuffer(tag, definition, value);
                 tag = channel.Writer.WriteTag(tag);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag))
-                    SetConnectionState(false);
+                if (CheckTagIsDisconnected(tag, ex.Message))
+                    NotifyDisconnect();
                 else throw;
             }
         }
@@ -179,16 +180,17 @@ namespace Logix.Driver
                 valueResolver.WriteTagBuffer(tag, definition, value);
                 tag = await channel.Writer.WriteTagAsync(tag);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag))
-                    SetConnectionState(false);
+                if (CheckTagIsDisconnected(tag, ex.Message))
+                    NotifyDisconnect();
                 else throw;
             }
         }
 
-        private static bool CheckTagIsDisconnected(Tag tag) =>
-            tag.GetStatus() switch
+        private static bool CheckTagIsDisconnected(Tag tag, string msg = "")
+        {
+            var status = tag.GetStatus() switch
             {
                 Status.ErrorBadConnection => true,
                 Status.ErrorTimeout => true,
@@ -196,6 +198,11 @@ namespace Logix.Driver
                 Status.Pending => true,
                 _ => false
             };
+
+            // observed condition where ErrorTimeout exception is thrown
+            // when tag status is unrelated (e.g. NotFound)
+            return (status || msg == "ErrorTimeout");
+        }
 
         private string ReadControllerInfo(bool useChannel = false)
         {
@@ -280,25 +287,45 @@ namespace Logix.Driver
         // connection state management
         private void SetConnectionState(bool connected)
         {
+            ITagValueChannel? oldChannel = null;
+
             lock (stateLock)
             {
-                if (isConnected == connected)
-                    return;
-
-                channel?.Dispose();
-                channel = connected ? channelFactory?.Open(tagFactory, QUEUE_INTERVAL_MS) : null;
+                if (isConnected == connected) return;
                 isConnected = connected;
 
-                StopHeartbeat();
-                if (connected && Target.HeartbeatInterval > TimeSpan.Zero)
-                    StartHeartbeat();
+                if (connected)
+                {
+                    channel = channelFactory?.Open(tagFactory, QUEUE_INTERVAL_MS);
+                    if (Target.HeartbeatInterval > TimeSpan.Zero)
+                        StartHeartbeat();
+                }
+                else
+                {
+                    oldChannel = channel;
+                    channel = null;
+                    // The heartbeat task self-terminates after this call returns.
+                    // Stale heartbeatCts/heartbeatTask refs are replaced on next StartHeartbeat
+                    // and explicitly cleaned up in Dispose.
+                }
             }
 
+            oldChannel?.Dispose();
             ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected));
+        }
+
+        // Wake the heartbeat to re-probe immediately. Safe to call from any thread.
+        private void NotifyDisconnect()
+        {
+            try { heartbeatWake.Release(); }
+            catch (SemaphoreFullException) { /* already pending */ }
         }
 
         private void StartHeartbeat()
         {
+            // drain any stale wake signal from a previous lifecycle
+            while (heartbeatWake.Wait(0)) { }
+
             heartbeatCts = new CancellationTokenSource();
             var token = heartbeatCts.Token;
             var interval = Target.HeartbeatInterval;
@@ -307,20 +334,27 @@ namespace Logix.Driver
 
         private void StopHeartbeat()
         {
-            heartbeatCts?.Cancel();
-            heartbeatCts?.Dispose();
+            var cts = heartbeatCts;
+            var task = heartbeatTask;
+            if (cts is null) return;
+
+            cts.Cancel();
+            try { task?.Wait(TimeSpan.FromSeconds(5)); }
+            catch (AggregateException) { /* expected */ }
+            cts.Dispose();
             heartbeatCts = null;
             heartbeatTask = null;
         }
 
         private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken token)
         {
-            using var timer = new PeriodicTimer(interval);
             try
             {
-                while (await timer.WaitForNextTickAsync(token))
+                while (true)
                 {
-                    if (string.IsNullOrEmpty(ReadControllerInfo(true)))
+                    await heartbeatWake.WaitAsync(interval, token);
+
+                    if (string.IsNullOrEmpty(ReadControllerInfo(useChannel: true)))
                     {
                         SetConnectionState(false);
                         return;
@@ -332,12 +366,14 @@ namespace Logix.Driver
 
         public void Dispose()
         {
+            StopHeartbeat();
+
             lock (stateLock)
             {
-                StopHeartbeat();
                 isConnected = false;
                 tagCache?.Flush();
                 channel?.Dispose();
+                channel = null;
             }
         }
     }

@@ -227,22 +227,22 @@ namespace Logix.Tags
                 switch (operation)
                 {
                     case ReadOperation readOp:
+                        operationKey = $"READ:{operation.TagName}";
                         await readOp.Tag.ReadAsync(cancel);
                         readOp.CompletionSource.TrySetResult(readOp.Tag);
-                        operationKey = $"READ:{operation.TagName}";
                         break;
 
                     case InitializeOperation initOp:
+                        operationKey = $"INIT:{operation.TagName}";
                         if (!initOp.Tag.IsInitialized)
                             await initOp.Tag.InitializeAsync(cancel);
                         initOp.CompletionSource.TrySetResult(initOp.Tag);
-                        operationKey = $"INIT:{operation.TagName}";
                         break;
 
                     case WriteOperation writeOp:
+                        operationKey = $"WRITE:{operation.TagName}";
                         await writeOp.Tag.WriteAsync(cancel);
                         writeOp.CompletionSource.TrySetResult(writeOp.Tag);
-                        operationKey = $"WRITE:{operation.TagName}";
                         break;
                 }
             }
@@ -262,9 +262,19 @@ namespace Logix.Tags
 
         public void Dispose()
         {
+
+            lock (pendingOperations) 
+            {
+                foreach (var operation in pendingOperations)
+                    operation.Value.CompletionSource.TrySetCanceled();
+
+                pendingOperations.Clear();
+            }
+
             initChannelWriter.TryComplete();
             writeChannelWriter.TryComplete();
             readChannelWriter.TryComplete();
+            
             pollingCts?.Cancel();
 
             try
