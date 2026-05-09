@@ -22,7 +22,7 @@ namespace Logix.Driver
 
         private CancellationTokenSource? heartbeatCts;
         private Task? heartbeatTask;
-        private readonly SemaphoreSlim heartbeatWake = new(0, 1);
+        private SemaphoreSlim heartbeatWake = new(0, 1);
         private readonly object stateLock = new();
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
 
@@ -206,6 +206,11 @@ namespace Logix.Driver
 
         private string ReadControllerInfo(bool useChannel = false)
         {
+            return ReadControllerInfoAsync(useChannel).GetAwaiter().GetResult();
+        }
+
+        private async Task<string> ReadControllerInfoAsync(bool useChannel = false, CancellationToken token = default)
+        {
             var rawPayload = new byte[] {
                 0x01, 0x02, 0x20, 0x01, 0x24, 0x01 };
 
@@ -220,18 +225,18 @@ namespace Logix.Driver
             try
             {
                 if (!tag.IsInitialized)
-                    if (useChannel) 
-                        channel!.Writer.Initialize(tag);
-                    else 
-                        tag.Initialize();
+                    if (useChannel)
+                        await channel!.Writer.InitializeAsync(tag).WaitAsync(token);
+                    else
+                        await tag.InitializeAsync(token);
 
                 tag.SetSize(rawPayload.Length);
                 tag.SetBuffer(rawPayload);
 
-                if (useChannel) 
-                    channel!.Writer.WriteTag(tag);
-                else 
-                    tag.Write();
+                if (useChannel)
+                    await channel!.Writer.WriteTagAsync(tag).WaitAsync(token);
+                else
+                    await tag.WriteAsync(token);
 
                 return TagMetaDecoder.DecodeControllerInfo(tag);
             }
@@ -304,9 +309,6 @@ namespace Logix.Driver
                 {
                     oldChannel = channel;
                     channel = null;
-                    // The heartbeat task self-terminates after this call returns.
-                    // Stale heartbeatCts/heartbeatTask refs are replaced on next StartHeartbeat
-                    // and explicitly cleaned up in Dispose.
                 }
             }
 
@@ -314,7 +316,6 @@ namespace Logix.Driver
             ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected));
         }
 
-        // Wake the heartbeat to re-probe immediately. Safe to call from any thread.
         private void NotifyDisconnect()
         {
             try { heartbeatWake.Release(); }
@@ -323,9 +324,7 @@ namespace Logix.Driver
 
         private void StartHeartbeat()
         {
-            // drain any stale wake signal from a previous lifecycle
-            while (heartbeatWake.Wait(0)) { }
-
+            heartbeatWake = new SemaphoreSlim(0, 1);
             heartbeatCts = new CancellationTokenSource();
             var token = heartbeatCts.Token;
             var interval = Target.HeartbeatInterval;
@@ -354,7 +353,7 @@ namespace Logix.Driver
                 {
                     await heartbeatWake.WaitAsync(interval, token);
 
-                    if (string.IsNullOrEmpty(ReadControllerInfo(useChannel: true)))
+                    if (string.IsNullOrEmpty(await ReadControllerInfoAsync(useChannel: true, token)))
                     {
                         SetConnectionState(false);
                         return;
