@@ -57,12 +57,12 @@ namespace Logix.Driver
             );
         }
 
-        public bool TryConnect()
+        public async Task<bool> TryConnectAsync(CancellationToken token = default)
         {
             if (isConnected)
                 return true;
 
-            string info = ReadControllerInfo();
+            string info = await ReadControllerInfoAsync(false, token);
             if (!string.IsNullOrEmpty(info))
             {
                 controllerInfo = info;
@@ -74,6 +74,11 @@ namespace Logix.Driver
                 SetConnectionState(false);
                 return false;
             }
+        }
+
+        public bool TryConnect()
+        {
+            return TryConnectAsync().GetAwaiter().GetResult();
         }
 
         public async Task LoadTagsAsync(IEnumerable<string>? tagFilter = null)
@@ -204,11 +209,6 @@ namespace Logix.Driver
             return (status || msg == "ErrorTimeout");
         }
 
-        private string ReadControllerInfo(bool useChannel = false)
-        {
-            return ReadControllerInfoAsync(useChannel).GetAwaiter().GetResult();
-        }
-
         private async Task<string> ReadControllerInfoAsync(bool useChannel = false, CancellationToken token = default)
         {
             var rawPayload = new byte[] {
@@ -225,15 +225,15 @@ namespace Logix.Driver
             try
             {
                 if (!tag.IsInitialized)
-                    if (useChannel)
-                        await channel!.Writer.InitializeAsync(tag).WaitAsync(token);
+                    if (useChannel && channel is not null)
+                        await channel.Writer.InitializeAsync(tag).WaitAsync(token);
                     else
                         await tag.InitializeAsync(token);
 
                 tag.SetSize(rawPayload.Length);
                 tag.SetBuffer(rawPayload);
 
-                if (useChannel)
+                if (useChannel && channel is not null)
                     await channel!.Writer.WriteTagAsync(tag).WaitAsync(token);
                 else
                     await tag.WriteAsync(token);

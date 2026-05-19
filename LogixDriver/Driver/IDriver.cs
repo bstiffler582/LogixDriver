@@ -15,6 +15,7 @@ namespace Logix.Driver
         public Task<object?> ReadTagValueAsync(string tagName);
         public void WriteTagValue(string tagName, object value);
         public Task WriteTagValueAsync(string tagName, object value);
+        public Task<bool> TryConnectAsync(CancellationToken token = default);
         public bool TryConnect();
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
     }

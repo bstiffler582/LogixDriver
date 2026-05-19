@@ -25,6 +25,7 @@ var target = new Target("MyPLC", "192.168.1.10", "1,0");
 
 using var driver = Driver.Create(target);
 
+bool isConnected = await driver.TryConnectAsync();
 // await driver.LoadTagsAsync(); // loads all tag definitions
 
 // load filtered tag definitions
@@ -74,7 +75,7 @@ var target = new Target("MyPLC", "192.168.1.10", "1,0");
 var driver = Driver.Create(target);
 driver.ConnectionStateChanged += (_, e) => Console.WriteLine("Connected:" + e.IsConnected);
 
-if (driver.TryConnect())
+if (await driver.TryConnectAsync())
 {
     // display controller model and version
     Console.WriteLine(driver.ControllerInfo);
