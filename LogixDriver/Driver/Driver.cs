@@ -9,50 +9,46 @@ namespace Logix.Driver
         public bool IsConnected => isConnected;
         public string ControllerInfo => controllerInfo;
 
-        private ITagValueChannel? channel;
+        private readonly ITagValueChannel channel;
 
         private readonly ITagCache tagCache;
         private readonly ITagMetaProvider metaProvider;
         private readonly ITagValueResolver valueResolver;
-        private readonly ITagValueChannelFactory channelFactory;
         private readonly ITagFactory tagFactory;
 
         private volatile bool isConnected = false;
         private string controllerInfo = string.Empty;
 
-        private CancellationTokenSource? heartbeatCts;
-        private Task? heartbeatTask;
-        private SemaphoreSlim heartbeatWake = new(0, 1);
+        private HeartbeatMonitor? heartbeat;
         private readonly object stateLock = new();
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
-
-        private const uint QUEUE_INTERVAL_MS = 50;
 
         public Driver(
             Target target,
             ITagValueResolver valueResolver,
             ITagCache tagCache,
             ITagMetaProvider metaProvider,
-            ITagValueChannelFactory channelFactory,
+            ITagValueChannel channel,
             ITagFactory tagFactory)
         {
             Target = target;
             this.valueResolver = valueResolver;
             this.tagCache = tagCache;
             this.metaProvider = metaProvider;
-            this.channelFactory = channelFactory;
+            this.channel = channel;
             this.tagFactory = tagFactory;
         }
 
         public static Driver Create(Target target, ITagValueResolver? valueResolver = null)
         {
             var tagFactory = new TagFactory(target);
+            var channel = new TagValueChannelFactory().Open(tagFactory);
             return new Driver(
                 target,
                 valueResolver ?? new DefaultTagValueResolver(),
                 new TagCache(),
-                new TagMetaProvider(tagFactory),
-                new TagValueChannelFactory(),
+                new TagMetaProvider(channel.Reader, new TagDefinitionCache()),
+                channel,
                 tagFactory
             );
         }
@@ -62,7 +58,7 @@ namespace Logix.Driver
             if (isConnected)
                 return true;
 
-            string info = await ReadControllerInfoAsync(false, token);
+            string info = await ReadControllerInfoAsync(token);
             if (!string.IsNullOrEmpty(info))
             {
                 controllerInfo = info;
@@ -103,7 +99,7 @@ namespace Logix.Driver
 
         public object? ReadTagValue(string tagName)
         {
-            if (!isConnected || channel is null)
+            if (!isConnected)
                 return null;
 
             var (definition, tag) = GetTag(tagName);
@@ -117,7 +113,7 @@ namespace Logix.Driver
             {
                 if (CheckTagIsDisconnected(tag, ex.Message))
                 {
-                    NotifyDisconnect();
+                    heartbeat?.RequestProbe();
                     return null;
                 }
                 else throw;
@@ -126,7 +122,7 @@ namespace Logix.Driver
 
         public async Task<object?> ReadTagValueAsync(string tagName)
         {
-            if (!isConnected || channel is null)
+            if (!isConnected)
                 return null;
 
             var (definition, tag) = GetTag(tagName);
@@ -140,7 +136,7 @@ namespace Logix.Driver
             {
                 if (CheckTagIsDisconnected(tag, ex.Message))
                 {
-                    NotifyDisconnect();
+                    heartbeat?.RequestProbe();
                     return null;
                 }
                 else throw;
@@ -149,7 +145,7 @@ namespace Logix.Driver
 
         public void WriteTagValue(string tagName, object value)
         {
-            if (!isConnected || channel is null)
+            if (!isConnected)
                 return;
 
             var (definition, tag) = GetTag(tagName);
@@ -165,14 +161,14 @@ namespace Logix.Driver
             catch (Exception ex)
             {
                 if (CheckTagIsDisconnected(tag, ex.Message))
-                    NotifyDisconnect();
+                    heartbeat?.RequestProbe();
                 else throw;
             }
         }
 
         public async Task WriteTagValueAsync(string tagName, object value)
         {
-            if (!isConnected || channel is null)
+            if (!isConnected)
                 return;
 
             var (definition, tag) = GetTag(tagName);
@@ -188,7 +184,7 @@ namespace Logix.Driver
             catch (Exception ex)
             {
                 if (CheckTagIsDisconnected(tag, ex.Message))
-                    NotifyDisconnect();
+                    heartbeat?.RequestProbe();
                 else throw;
             }
         }
@@ -209,7 +205,7 @@ namespace Logix.Driver
             return (status || msg == "ErrorTimeout");
         }
 
-        private async Task<string> ReadControllerInfoAsync(bool useChannel = false, CancellationToken token = default)
+        private async Task<string> ReadControllerInfoAsync(CancellationToken token = default)
         {
             var rawPayload = new byte[] {
                 0x01, 0x02, 0x20, 0x01, 0x24, 0x01 };
@@ -225,19 +221,12 @@ namespace Logix.Driver
             try
             {
                 if (!tag.IsInitialized)
-                    if (useChannel && channel is not null)
-                        await channel.Writer.InitializeAsync(tag).WaitAsync(token);
-                    else
-                        await tag.InitializeAsync(token);
+                    await channel.Writer.InitializeAsync(tag).WaitAsync(token);
 
                 tag.SetSize(rawPayload.Length);
                 tag.SetBuffer(rawPayload);
 
-                if (useChannel && channel is not null)
-                    await channel!.Writer.WriteTagAsync(tag).WaitAsync(token);
-                else
-                    await tag.WriteAsync(token);
-
+                await channel.Writer.WriteTagAsync(tag).WaitAsync(token);
                 return TagMetaDecoder.DecodeControllerInfo(tag);
             }
             catch (Exception)
@@ -292,7 +281,8 @@ namespace Logix.Driver
         // connection state management
         private void SetConnectionState(bool connected)
         {
-            ITagValueChannel? oldChannel = null;
+            bool flush = false;
+            HeartbeatMonitor? toDispose = null;
 
             lock (stateLock)
             {
@@ -301,79 +291,41 @@ namespace Logix.Driver
 
                 if (connected)
                 {
-                    channel = channelFactory?.Open(tagFactory, QUEUE_INTERVAL_MS);
                     if (Target.HeartbeatInterval > TimeSpan.Zero)
-                        StartHeartbeat();
+                        heartbeat = new HeartbeatMonitor(
+                            Target.HeartbeatInterval,
+                            () => channel.LastActivityAt,
+                            async (ct) => !string.IsNullOrEmpty(await ReadControllerInfoAsync(ct)),
+                            () => SetConnectionState(false));
                 }
                 else
                 {
-                    oldChannel = channel;
-                    channel = null;
+                    toDispose = heartbeat;
+                    heartbeat = null;
+                    flush = true;
                 }
             }
 
-            oldChannel?.Dispose();
+            // Dispose the monitor and flush outside the state lock — both can block briefly and
+            // may run continuations we don't want to hold the lock through.
+            toDispose?.Dispose();
+            if (flush) channel.Flush();
             ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected));
-        }
-
-        private void NotifyDisconnect()
-        {
-            try { heartbeatWake.Release(); }
-            catch (SemaphoreFullException) { /* already pending */ }
-        }
-
-        private void StartHeartbeat()
-        {
-            heartbeatWake = new SemaphoreSlim(0, 1);
-            heartbeatCts = new CancellationTokenSource();
-            var token = heartbeatCts.Token;
-            var interval = Target.HeartbeatInterval;
-            heartbeatTask = Task.Run(() => HeartbeatLoopAsync(interval, token));
-        }
-
-        private void StopHeartbeat()
-        {
-            var cts = heartbeatCts;
-            var task = heartbeatTask;
-            if (cts is null) return;
-
-            cts.Cancel();
-            try { task?.Wait(TimeSpan.FromSeconds(5)); }
-            catch (AggregateException) { /* expected */ }
-            cts.Dispose();
-            heartbeatCts = null;
-            heartbeatTask = null;
-        }
-
-        private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken token)
-        {
-            try
-            {
-                while (true)
-                {
-                    await heartbeatWake.WaitAsync(interval, token);
-
-                    if (string.IsNullOrEmpty(await ReadControllerInfoAsync(useChannel: true, token)))
-                    {
-                        SetConnectionState(false);
-                        return;
-                    }
-                }
-            }
-            catch (OperationCanceledException) { }
         }
 
         public void Dispose()
         {
-            StopHeartbeat();
-
+            HeartbeatMonitor? toDispose;
             lock (stateLock)
             {
                 isConnected = false;
+                toDispose = heartbeat;
+                heartbeat = null;
                 tagCache?.Flush();
-                channel?.Dispose();
-                channel = null;
             }
+
+            toDispose?.Dispose();
+            channel.Dispose();
         }
     }
 }

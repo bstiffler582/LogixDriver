@@ -6,6 +6,8 @@ namespace Logix.Tags
     {
         ITagValueReader Reader { get; }
         ITagValueWriter Writer { get; }
+        void Flush();
+        long LastActivityAt { get; }
     }
 
     internal sealed class TagValueChannel : ITagValueChannel
@@ -20,6 +22,10 @@ namespace Logix.Tags
             Writer = writer;
             this.queue = queue;
         }
+
+        public void Flush() => queue.Flush();
+
+        public long LastActivityAt => queue.LastActivityAt;
 
         public void Dispose() => queue.Dispose();
     }
