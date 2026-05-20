@@ -1,5 +1,5 @@
-﻿using Logix.Driver;
-using libplctag;
+﻿using libplctag;
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 namespace Logix.Tags
@@ -12,6 +12,9 @@ namespace Logix.Tags
         public Tag EnqueueInitializeSync(Tag tag);
         public Task<Tag> EnqueueWriteAsync(Tag tag);
         public Tag EnqueueWriteSync(Tag tag);
+        public void Flush();
+        // Environment.TickCount64-style timestamp of the last successful op. 0 if none.
+        public long LastActivityAt { get; }
     }
 
     /// <summary>
@@ -37,14 +40,31 @@ namespace Logix.Tags
         private readonly ChannelWriter<WriteOperation> writeChannelWriter;
         private readonly ChannelReader<WriteOperation> writeChannelReader;
         
-        private Task? pollingTask;
-        private CancellationTokenSource? pollingCts;
+        private Task? consumerTask;
+        private CancellationTokenSource? consumerCts;
 
         // Track pending operations by tag name and type to prevent duplicates
         private readonly Dictionary<string, QueuedOperation> pendingOperations = new();
 
-        public TagReadWriteQueue(uint pollingRateMs = 100)
+        // Caps total in-flight ops against libplctag.
+        private readonly SemaphoreSlim globalConcurrency;
+        private readonly int maxConcurrency;
+
+        // Per-tag mutex: serializes ops touching the same native tag handle.
+        // Cross-tag ops run in parallel up to the global concurrency cap.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> perTagLocks = new();
+
+        // Activity tracking: timestamp (Environment.TickCount64) of the last successful op.
+        // Exposed for external liveness monitoring; the queue itself does no idle detection.
+        private long lastActivityTicks;
+        public long LastActivityAt => Volatile.Read(ref lastActivityTicks);
+
+        public TagReadWriteQueue(int maxConcurrency = 8)
         {
+            if (maxConcurrency < 1) throw new ArgumentOutOfRangeException(nameof(maxConcurrency));
+            this.maxConcurrency = maxConcurrency;
+            globalConcurrency = new SemaphoreSlim(maxConcurrency, maxConcurrency);
+
             // Separate unbounded channels for reads and writes
             var readChannel = Channel.CreateUnbounded<ReadOperation>(new UnboundedChannelOptions
             {
@@ -71,7 +91,7 @@ namespace Logix.Tags
             writeChannelWriter = writeChannel.Writer;
             writeChannelReader = writeChannel.Reader;
 
-            StartPolling(pollingRateMs);
+            StartConsumer();
         }
 
         /// <summary>
@@ -169,43 +189,60 @@ namespace Logix.Tags
             return task.GetAwaiter().GetResult();
         }
 
-        private void StartPolling(uint pollingRateMs)
+        private void MarkActivity() => Volatile.Write(ref lastActivityTicks, Environment.TickCount64);
+
+        /// <summary>
+        /// Cancel all queued and tracked operations without tearing down the queue.
+        /// In-flight (already dispatched) ops continue to completion in the background;
+        /// their TCSes are already cancelled here so callers see the cancellation immediately.
+        /// </summary>
+        public void Flush()
         {
-            pollingCts = new CancellationTokenSource();
-            pollingTask = Task.Run(() => ProcessQueueLoop(pollingRateMs, pollingCts.Token), pollingCts.Token);
+            while (initChannelReader.TryRead(out var op)) op.CompletionSource.TrySetCanceled();
+            while (writeChannelReader.TryRead(out var op)) op.CompletionSource.TrySetCanceled();
+            while (readChannelReader.TryRead(out var op)) op.CompletionSource.TrySetCanceled();
+
+            lock (pendingOperations)
+            {
+                foreach (var op in pendingOperations.Values)
+                    op.CompletionSource.TrySetCanceled();
+                pendingOperations.Clear();
+            }
         }
 
-        private async Task ProcessQueueLoop(uint pollingRateMs, CancellationToken cancel)
+        private void StartConsumer()
+        {
+            consumerCts = new CancellationTokenSource();
+            consumerTask = Task.Run(() => ConsumeLoop(consumerCts.Token), consumerCts.Token);
+        }
+
+        private async Task ConsumeLoop(CancellationToken cancel)
         {
             try
             {
-                using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(pollingRateMs));
+                Task<bool>? initWait = null, writeWait = null, readWait = null;
 
-                while (await timer.WaitForNextTickAsync(cancel))
+                while (!cancel.IsCancellationRequested)
                 {
-                    int processed = 0;
-                    const int maxPerCycle = 100;
+                    initWait ??= initChannelReader.WaitToReadAsync(cancel).AsTask();
+                    writeWait ??= writeChannelReader.WaitToReadAsync(cancel).AsTask();
+                    readWait ??= readChannelReader.WaitToReadAsync(cancel).AsTask();
 
-                    // Process all inits first (highest priority)
-                    while (processed < maxPerCycle && initChannelReader.TryRead(out var initOperation))
-                    {
-                        await ProcessOperation(initOperation, cancel);
-                        processed++;
-                    }
+                    await Task.WhenAny(initWait, writeWait, readWait);
 
-                    // Process all writes next (higher priority)
-                    while (processed < maxPerCycle && writeChannelReader.TryRead(out var writeOperation))
-                    {
-                        await ProcessOperation(writeOperation, cancel);
-                        processed++;
-                    }
+                    // priority: init -> write -> read
+                    while (initChannelReader.TryRead(out var initOperation))
+                        await DispatchAsync(initOperation, cancel);
 
-                    // Then process reads with remaining capacity
-                    while (processed < maxPerCycle && readChannelReader.TryRead(out var readOperation))
-                    {
-                        await ProcessOperation(readOperation, cancel);
-                        processed++;
-                    }
+                    while (writeChannelReader.TryRead(out var writeOperation))
+                        await DispatchAsync(writeOperation, cancel);
+
+                    while (readChannelReader.TryRead(out var readOperation))
+                        await DispatchAsync(readOperation, cancel);
+
+                    if (initWait.IsCompleted) initWait = null;
+                    if (writeWait.IsCompleted) writeWait = null;
+                    if (readWait.IsCompleted) readWait = null;
                 }
             }
             catch (OperationCanceledException) when (cancel.IsCancellationRequested)
@@ -218,30 +255,91 @@ namespace Logix.Tags
             }
         }
 
+        // Acquire a global slot, then start the actual operation work as a fire-and-forget task.
+        // The consumer loop only blocks on the global semaphore — once a slot is acquired it
+        // moves on to the next op, so cross-tag work proceeds in parallel.
+        private async Task DispatchAsync(QueuedOperation operation, CancellationToken cancel)
+        {
+            try
+            {
+                await globalConcurrency.WaitAsync(cancel);
+            }
+            catch (OperationCanceledException)
+            {
+                operation.CompletionSource.TrySetCanceled(cancel);
+                RemoveIfCurrent(operation);
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                var tagLock = perTagLocks.GetOrAdd(operation.TagName, _ => new SemaphoreSlim(1, 1));
+                try
+                {
+                    await tagLock.WaitAsync(cancel);
+                    try
+                    {
+                        await ProcessOperation(operation, cancel);
+                    }
+                    finally
+                    {
+                        tagLock.Release();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    operation.CompletionSource.TrySetCanceled(cancel);
+                    RemoveIfCurrent(operation);
+                }
+                finally
+                {
+                    globalConcurrency.Release();
+                }
+            });
+        }
+
+        // Remove the op from the pending dict only if it's still the one tracked under that key.
+        // After a Flush() or a coalescing replace, a different op may now hold the key — leave it alone.
+        private void RemoveIfCurrent(QueuedOperation operation)
+        {
+            var key = OperationKey(operation);
+            lock (pendingOperations)
+            {
+                if (pendingOperations.TryGetValue(key, out var current) && ReferenceEquals(current, operation))
+                    pendingOperations.Remove(key);
+            }
+        }
+
+        private static string OperationKey(QueuedOperation operation) => operation switch
+        {
+            ReadOperation => $"READ:{operation.TagName}",
+            WriteOperation => $"WRITE:{operation.TagName}",
+            InitializeOperation => $"INIT:{operation.TagName}",
+            _ => string.Empty
+        };
+
         private async Task ProcessOperation(QueuedOperation operation, CancellationToken cancel)
         {
-            string operationKey = string.Empty;
-
             try
             {
                 switch (operation)
                 {
                     case ReadOperation readOp:
-                        operationKey = $"READ:{operation.TagName}";
                         await readOp.Tag.ReadAsync(cancel);
+                        MarkActivity();
                         readOp.CompletionSource.TrySetResult(readOp.Tag);
                         break;
 
                     case InitializeOperation initOp:
-                        operationKey = $"INIT:{operation.TagName}";
                         if (!initOp.Tag.IsInitialized)
                             await initOp.Tag.InitializeAsync(cancel);
+                        MarkActivity();
                         initOp.CompletionSource.TrySetResult(initOp.Tag);
                         break;
 
                     case WriteOperation writeOp:
-                        operationKey = $"WRITE:{operation.TagName}";
                         await writeOp.Tag.WriteAsync(cancel);
+                        MarkActivity();
                         writeOp.CompletionSource.TrySetResult(writeOp.Tag);
                         break;
                 }
@@ -252,41 +350,48 @@ namespace Logix.Tags
             }
             finally
             {
-                // Remove from pending tracking when complete
-                lock (pendingOperations)
-                {
-                    pendingOperations.Remove(operationKey);
-                }
+                RemoveIfCurrent(operation);
             }
         }
 
         public void Dispose()
         {
-
-            lock (pendingOperations) 
-            {
-                foreach (var operation in pendingOperations)
-                    operation.Value.CompletionSource.TrySetCanceled();
-
-                pendingOperations.Clear();
-            }
-
             initChannelWriter.TryComplete();
             writeChannelWriter.TryComplete();
             readChannelWriter.TryComplete();
-            
-            pollingCts?.Cancel();
+
+            consumerCts?.Cancel();
 
             try
             {
-                pollingTask?.Wait(TimeSpan.FromSeconds(5));
+                consumerTask?.Wait(TimeSpan.FromSeconds(5));
             }
-            catch (OperationCanceledException)
+            catch (AggregateException)
             {
-                // Expected if already cancelled
+                // Expected — OCE wrapped
             }
 
-            pollingCts?.Dispose();
+            // Drain in-flight dispatched ops by acquiring all global permits.
+            // Bounded wait so a stuck libplctag call can't hold dispose forever.
+            for (int i = 0; i < maxConcurrency; i++)
+            {
+                try { globalConcurrency.Wait(TimeSpan.FromSeconds(5)); }
+                catch (ObjectDisposedException) { break; }
+            }
+
+            lock (pendingOperations)
+            {
+                foreach (var operation in pendingOperations)
+                    operation.Value.CompletionSource.TrySetCanceled();
+                pendingOperations.Clear();
+            }
+
+            foreach (var tagLock in perTagLocks.Values)
+                tagLock.Dispose();
+            perTagLocks.Clear();
+
+            globalConcurrency.Dispose();
+            consumerCts?.Dispose();
         }
     }
 }
