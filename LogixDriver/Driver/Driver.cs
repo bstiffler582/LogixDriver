@@ -36,8 +36,10 @@ namespace Logix.Driver
 
             monitor = new ConnectionMonitor(
                 target.HeartbeatInterval,
+                // one timeout waiting behind in-flight ops for a slot, one for the probe itself
+                TimeSpan.FromMilliseconds(target.TimeoutMs * 2),
                 channel,
-                tagFactory.Create("@raw"),
+                () => tagFactory.Create("@raw"),
                 connected => ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected)));
         }
 
@@ -90,12 +92,12 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            var (definition, tag) = GetTag(tagName);
+            var (definition, tag) = GetTagAsync(tagName).GetAwaiter().GetResult();
 
             try
             {
-                tag = channel.Reader.ReadTag(tag);
-                return valueResolver.ResolveValue(tag, definition);
+                var buffer = channel.Reader.ReadBuffer(tag);
+                return valueResolver.ResolveValue(buffer, definition);
             }
             catch (Exception ex)
             {
@@ -113,12 +115,12 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            var (definition, tag) = GetTag(tagName);
+            var (definition, tag) = await GetTagAsync(tagName);
 
             try
             {
-                tag = await channel.Reader.ReadTagAsync(tag);
-                return valueResolver.ResolveValue(tag, definition);
+                var buffer = await channel.Reader.ReadBufferAsync(tag);
+                return valueResolver.ResolveValue(buffer, definition);
             }
             catch (Exception ex)
             {
@@ -136,15 +138,15 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            var (definition, tag) = GetTag(tagName);
+            var (definition, tag) = GetTagAsync(tagName).GetAwaiter().GetResult();
 
             try
             {
                 if (!tag.IsInitialized)
                     tag = channel.Writer.Initialize(tag);
 
-                valueResolver.WriteTagBuffer(tag, definition, value);
-                tag = channel.Writer.WriteTag(tag);
+                // encoding runs inside the queue under the per-tag lock, not against the shared tag here
+                channel.Writer.WriteTag(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value));
             }
             catch (Exception ex)
             {
@@ -159,15 +161,15 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            var (definition, tag) = GetTag(tagName);
+            var (definition, tag) = await GetTagAsync(tagName);
 
             try
             {
                 if (!tag.IsInitialized)
                     tag = await channel.Writer.InitializeAsync(tag);
 
-                valueResolver.WriteTagBuffer(tag, definition, value);
-                tag = await channel.Writer.WriteTagAsync(tag);
+                // encoding runs inside the queue under the per-tag lock, not against the shared tag here
+                await channel.Writer.WriteTagAsync(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value));
             }
             catch (Exception ex)
             {
@@ -193,30 +195,17 @@ namespace Logix.Driver
             return (status || msg == "ErrorTimeout");
         }
 
-        private (TagDefinition, Tag) GetTag(string tagPath)
+        private async Task<(TagDefinition, Tag)> GetTagAsync(string tagPath)
         {
             if (!metaProvider.TryGetTagDefinition(tagPath, out var definition) || definition!.ExpansionLevel != ExpansionLevel.Deep)
-                definition = metaProvider.LoadTagDefinition(tagPath);
+                definition = await metaProvider.LoadTagDefinitionAsync(tagPath);
 
             if (definition is null)
                 throw new KeyNotFoundException($"Unable to load tag definition for {tagPath}.");
 
-            if (!tagCache.TryGetTag(tagPath, out var tag))
-            {
-                if (definition!.IsArray)
-                {
-                    var readPath = ResolveArrayPath(tagPath, definition);
-                    tag = tagFactory.Create(readPath, definition.ElementCount());
-                }
-                else
-                {
-                    tag = tagFactory.Create(tagPath);
-                }
-                tagCache.AddTag(tagPath, tag);
-            }
-
-            if (tag is null)
-                throw new Exception($"Unable to create tag {tagPath}.");
+            var tag = tagCache.GetOrAdd(tagPath, () => definition.IsArray
+                ? tagFactory.Create(ResolveArrayPath(tagPath, definition), definition.ElementCount())
+                : tagFactory.Create(tagPath));
 
             return (definition, tag);
         }
@@ -237,8 +226,9 @@ namespace Logix.Driver
         public void Dispose()
         {
             monitor.Dispose();
-            tagCache?.Flush();
+            // drain in-flight ops before disposing the tags they're running on
             channel.Dispose();
+            tagCache?.Flush();
         }
     }
 }

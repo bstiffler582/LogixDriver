@@ -1,11 +1,15 @@
-﻿using libplctag;
+using libplctag;
 
 namespace Logix.Tags
 {
     public interface ITagValueReader
     {
-        public Task<Tag> ReadTagAsync(Tag tag);
-        public Tag ReadTag(Tag tag);
+        /// <summary>
+        /// Reads the tag and returns a copy of its data. The copy may be shared with concurrent
+        /// readers of the same tag — treat it as read-only.
+        /// </summary>
+        public Task<byte[]> ReadBufferAsync(Tag tag);
+        public byte[] ReadBuffer(Tag tag);
         public Task<Tag> ReadTagAsync(string tagName, int elementCount = 1);
         public Tag ReadTag(string tagName, int elementCount = 1);
     }
@@ -14,20 +18,20 @@ namespace Logix.Tags
     {
         private readonly ITagFactory tagFactory;
 
-        public TagValueReader(ITagFactory tagFactory) 
-        { 
+        public TagValueReader(ITagFactory tagFactory)
+        {
             this.tagFactory = tagFactory;
         }
 
-        public async Task<Tag> ReadTagAsync(Tag tag)
+        public async Task<byte[]> ReadBufferAsync(Tag tag)
         {
             await tag.ReadAsync();
-            return tag;
+            return tag.GetBuffer();
         }
 
-        public Tag ReadTag(Tag tag)
+        public byte[] ReadBuffer(Tag tag)
         {
-            return ReadTagAsync(tag).GetAwaiter().GetResult();
+            return ReadBufferAsync(tag).GetAwaiter().GetResult();
         }
 
         public async Task<Tag> ReadTagAsync(string tagName, int elementCount = 1)

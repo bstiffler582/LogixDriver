@@ -1,4 +1,6 @@
-﻿namespace Logix.Tags
+﻿using System.Collections.Concurrent;
+
+namespace Logix.Tags
 {
     public interface ITagDefinitionCache
     {
@@ -12,13 +14,17 @@
 
     internal class TagDefinitionCache : ITagDefinitionCache
     {
+        // Root definitions keep insertion order (drives tag browser order), so guard with a lock
+        // and hand out snapshots. Flat and type maps are read on every tag access -> concurrent.
+        private readonly object rootsLock = new();
         private readonly Dictionary<string, TagDefinition> tagDefinitions = new();
-        private readonly Dictionary<string, TagDefinition> tagDefinitionsFlat = new();
-        private readonly Dictionary<ushort, TypeDefinition> typeDefinitionCache = new();
+        private readonly ConcurrentDictionary<string, TagDefinition> tagDefinitionsFlat = new();
+        private readonly ConcurrentDictionary<ushort, TypeDefinition> typeDefinitionCache = new();
 
         public void AddTagDefinition(TagDefinition tagDefinition)
         {
-            tagDefinitions.TryAdd(tagDefinition.Name, tagDefinition);
+            lock (rootsLock)
+                tagDefinitions.TryAdd(tagDefinition.Name, tagDefinition);
 
             var flattened = Flatten(tagDefinition);
             foreach (var t in flattened)
@@ -27,7 +33,8 @@
 
         public IEnumerable<TagDefinition> GetTagDefinitions()
         {
-            return tagDefinitions.Values;
+            lock (rootsLock)
+                return tagDefinitions.Values.ToList();
         }
 
         public IReadOnlyDictionary<string, TagDefinition> GetTagDefinitionsFlat()

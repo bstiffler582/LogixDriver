@@ -21,6 +21,10 @@ namespace Logix.Tags
         private readonly ITagDefinitionExpander definitionExpander;
         private readonly ITagDefinitionCache cache;
 
+        // Serializes definition loads: expansion mutates shared TagDefinition nodes in place,
+        // so concurrent loads of the same root would duplicate PLC reads and clobber Children.
+        private readonly SemaphoreSlim loadGate = new(1, 1);
+
         public TagMetaProvider(ITagFactory tagFactory)
           : this(new TagValueReader(tagFactory), new TagDefinitionCache())
         { }
@@ -39,24 +43,32 @@ namespace Logix.Tags
 
         public async Task<IEnumerable<TagDefinition>> LoadTagDefinitionsAsync(IEnumerable<string>? tagNames = null)
         {
-            IEnumerable<TagDefinition>? tagDefinitions = await ReadAndFilterBaseTags();
+            await loadGate.WaitAsync();
+            try
+            {
+                IEnumerable<TagDefinition>? tagDefinitions = await ReadAndFilterBaseTags();
 
-            // selective expansion
-            if (tagNames is not null && tagNames.Any())
-            {
-                foreach (var tagName in tagNames)
-                    await LoadTagDefinitionAsync(tagName, tagDefinitions);
-            }
-            else
-            {
-                foreach (var tag in tagDefinitions!)
+                // selective expansion
+                if (tagNames is not null && tagNames.Any())
                 {
-                    await definitionExpander!.ExpandTagDefinitionAsync(tag, true);
-                    cache.AddTagDefinition(tag);
+                    foreach (var tagName in tagNames)
+                        await LoadTagDefinitionAsync(tagName, tagDefinitions);
                 }
-            }
+                else
+                {
+                    foreach (var tag in tagDefinitions!)
+                    {
+                        await definitionExpander!.ExpandTagDefinitionAsync(tag, true);
+                        cache.AddTagDefinition(tag);
+                    }
+                }
 
-            return tagDefinitions;
+                return tagDefinitions;
+            }
+            finally
+            {
+                loadGate.Release();
+            }
         }
 
         public IEnumerable<TagDefinition> LoadTagDefinitions(IEnumerable<string>? tagNames = null)
@@ -66,15 +78,29 @@ namespace Logix.Tags
 
         public async Task<TagDefinition> LoadTagDefinitionAsync(string tagName)
         {
-            var loadedDefinitions = cache.GetTagDefinitions();
-            if (loadedDefinitions.Count() < 1)
+            await loadGate.WaitAsync();
+            try
             {
-                var baseTags = await ReadAndFilterBaseTags();
-                foreach (var tag in baseTags)
-                    cache.AddTagDefinition(tag);
-            }
+                // another caller may have loaded this tag while we waited on the gate
+                if (cache.TryGetTagDefinition(tagName, out var cached) && cached!.ExpansionLevel == ExpansionLevel.Deep)
+                    return new TagDefinition(cached) { Name = tagName };
 
-            return await LoadTagDefinitionAsync(tagName, loadedDefinitions);
+                var loadedDefinitions = cache.GetTagDefinitions();
+                if (!loadedDefinitions.Any())
+                {
+                    var baseTags = await ReadAndFilterBaseTags();
+                    foreach (var tag in baseTags)
+                        cache.AddTagDefinition(tag);
+
+                    loadedDefinitions = cache.GetTagDefinitions();
+                }
+
+                return await LoadTagDefinitionAsync(tagName, loadedDefinitions);
+            }
+            finally
+            {
+                loadGate.Release();
+            }
         }
 
         public TagDefinition LoadTagDefinition(string tagName)
@@ -103,13 +129,14 @@ namespace Logix.Tags
             while (pathQueue.Count > 0)
             {
                 var memberName = pathQueue.Dequeue();
-                if (tag?.ExpansionLevel < ExpansionLevel.Shallow)
+                if (tag.ExpansionLevel < ExpansionLevel.Shallow)
                     await definitionExpander.ExpandTagDefinitionAsync(tag, false);
-                var member = tag?.Children!.FirstOrDefault(c => c.Name == memberName);
-                tag = member!;
+                tag = tag.Children?.FirstOrDefault(c => c.Name == memberName)
+                    ?? throw new KeyNotFoundException($"Member '{memberName}' not found while resolving '{tagName}'.");
             }
 
-            if (!tag.IsPrimitive && tag.ExpansionLevel < ExpansionLevel.Deep)
+            // primitives are expanded too so they get marked Deep; otherwise GetTag re-resolves them on every read
+            if (tag.ExpansionLevel < ExpansionLevel.Deep)
                 await definitionExpander.ExpandTagDefinitionAsync(tag, true);
 
             // re-add root to flatten expanded children

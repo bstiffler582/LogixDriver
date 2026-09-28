@@ -1,17 +1,26 @@
 ﻿using libplctag;
-using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 namespace Logix.Tags
 {
+    /// <summary>
+    /// Result of a queued operation. <see cref="Buffer"/> is a copy of the tag's data taken while
+    /// the operation still held the per-tag lock, so it can't be torn by later ops on the same tag.
+    /// Reads: the data read. Writes: the data written. Initialize: empty.
+    /// The buffer may be shared between coalesced readers — treat it as read-only.
+    /// </summary>
+    public readonly record struct TagSnapshot(Tag Tag, byte[] Buffer);
+
     public interface ITagReadWriteQueue : IDisposable
     {
-        public Task<Tag> EnqueueReadAsync(Tag tag);
-        public Tag EnqueueReadSync(Tag tag);
-        public Task<Tag> EnqueueInitializeAsync(Tag tag);
-        public Tag EnqueueInitializeSync(Tag tag);
-        public Task<Tag> EnqueueWriteAsync(Tag tag);
-        public Tag EnqueueWriteSync(Tag tag);
+        public Task<TagSnapshot> EnqueueReadAsync(Tag tag);
+        public TagSnapshot EnqueueReadSync(Tag tag);
+        public Task<TagSnapshot> EnqueueInitializeAsync(Tag tag);
+        public TagSnapshot EnqueueInitializeSync(Tag tag);
+        // encode (optional) receives a copy of the tag's current buffer and fills in the value to write.
+        // It runs under the per-tag lock, immediately before the write.
+        public Task<TagSnapshot> EnqueueWriteAsync(Tag tag, Action<byte[]>? encode = null);
+        public TagSnapshot EnqueueWriteSync(Tag tag, Action<byte[]>? encode = null);
         public void Flush();
         // Environment.TickCount64-style timestamp of the last successful op. 0 if none.
         public long LastActivityAt { get; }
@@ -19,18 +28,18 @@ namespace Logix.Tags
 
     /// <summary>
     /// Producer/consumer queues for managing async tag read/write operations.
-    /// Ensures read/write operations are handled on a single task/thread.
-    /// Executes cyclically with a max number of operations per cycle.
+    /// A single consumer loop dispatches ops by priority (init -> write -> read), running up to
+    /// maxConcurrency in parallel with at most one in flight per tag.
     /// </summary>
     internal class TagReadWriteQueue : ITagReadWriteQueue
     {
         private abstract record QueuedOperation(string TagName)
         {
-            public TaskCompletionSource<Tag> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public TaskCompletionSource<TagSnapshot> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
         private sealed record ReadOperation(Tag Tag) : QueuedOperation(Tag.Name);
-        private sealed record WriteOperation(Tag Tag) : QueuedOperation(Tag.Name);
+        private sealed record WriteOperation(Tag Tag, Action<byte[]>? Encode) : QueuedOperation(Tag.Name);
         private sealed record InitializeOperation(Tag Tag) : QueuedOperation(Tag.Name);
 
         private readonly ChannelWriter<ReadOperation> readChannelWriter;
@@ -50,9 +59,12 @@ namespace Logix.Tags
         private readonly SemaphoreSlim globalConcurrency;
         private readonly int maxConcurrency;
 
-        // Per-tag mutex: serializes ops touching the same native tag handle.
-        // Cross-tag ops run in parallel up to the global concurrency cap.
-        private readonly ConcurrentDictionary<string, SemaphoreSlim> perTagLocks = new();
+        // Per-tag serialization: at most one op per tag name is in flight (busyTags). Ops for a busy
+        // tag are parked here — without holding a global slot — and re-queued when the tag's current
+        // op completes. Cross-tag ops run in parallel up to the global concurrency cap.
+        private readonly object tagStateLock = new();
+        private readonly HashSet<string> busyTags = new();
+        private readonly Dictionary<string, List<QueuedOperation>> parkedOperations = new();
 
         // Activity tracking: timestamp (Environment.TickCount64) of the last successful op.
         // Exposed for external liveness monitoring; the queue itself does no idle detection.
@@ -98,7 +110,7 @@ namespace Logix.Tags
         /// Enqueue a read operation and return the value asynchronously.
         /// If a read for the same tag is already pending, returns the existing task.
         /// </summary>
-        public Task<Tag> EnqueueReadAsync(Tag tag)
+        public Task<TagSnapshot> EnqueueReadAsync(Tag tag)
         {
             lock (pendingOperations)
             {
@@ -120,13 +132,13 @@ namespace Logix.Tags
         /// <summary>
         /// Enqueue a read operation and wait synchronously for the result
         /// </summary>
-        public Tag EnqueueReadSync(Tag tag)
+        public TagSnapshot EnqueueReadSync(Tag tag)
         {
             var task = EnqueueReadAsync(tag);
             return task.GetAwaiter().GetResult();
         }
 
-        public Task<Tag> EnqueueInitializeAsync(Tag tag)
+        public Task<TagSnapshot> EnqueueInitializeAsync(Tag tag)
         {
             lock (pendingOperations)
             {
@@ -148,7 +160,7 @@ namespace Logix.Tags
             }
         }
 
-        public Tag EnqueueInitializeSync(Tag tag)
+        public TagSnapshot EnqueueInitializeSync(Tag tag)
         {
             var task = EnqueueInitializeAsync(tag);
             return task.GetAwaiter().GetResult();
@@ -158,13 +170,13 @@ namespace Logix.Tags
         /// Enqueue a write operation and return completion asynchronously.
         /// Newer writes to the same tag replace older pending writes.
         /// </summary>
-        public Task<Tag> EnqueueWriteAsync(Tag tag)
+        public Task<TagSnapshot> EnqueueWriteAsync(Tag tag, Action<byte[]>? encode = null)
         {
             lock (pendingOperations)
             {
                 var operationKey = $"WRITE:{tag.Name}";
 
-                var operation = new WriteOperation(tag);
+                var operation = new WriteOperation(tag, encode);
 
                 // If a write already exists for this tag, cancel it and replace with new one
                 if (pendingOperations.TryGetValue(operationKey, out var existing) && existing is WriteOperation)
@@ -183,9 +195,9 @@ namespace Logix.Tags
         /// <summary>
         /// Enqueue a write operation and wait synchronously for completion
         /// </summary>
-        public Tag EnqueueWriteSync(Tag tag)
+        public TagSnapshot EnqueueWriteSync(Tag tag, Action<byte[]>? encode = null)
         {
-            var task = EnqueueWriteAsync(tag);
+            var task = EnqueueWriteAsync(tag, encode);
             return task.GetAwaiter().GetResult();
         }
 
@@ -208,6 +220,20 @@ namespace Logix.Tags
                     op.CompletionSource.TrySetCanceled();
                 pendingOperations.Clear();
             }
+
+            // busyTags is left alone: those tags still have native ops in flight
+            CancelParkedOperations();
+        }
+
+        private void CancelParkedOperations()
+        {
+            lock (tagStateLock)
+            {
+                foreach (var parked in parkedOperations.Values)
+                    foreach (var op in parked)
+                        op.CompletionSource.TrySetCanceled();
+                parkedOperations.Clear();
+            }
         }
 
         private void StartConsumer()
@@ -224,25 +250,36 @@ namespace Logix.Tags
 
                 while (!cancel.IsCancellationRequested)
                 {
-                    initWait ??= initChannelReader.WaitToReadAsync(cancel).AsTask();
-                    writeWait ??= writeChannelReader.WaitToReadAsync(cancel).AsTask();
-                    readWait ??= readChannelReader.WaitToReadAsync(cancel).AsTask();
+                    // Take a slot before choosing the op, so each freed slot goes to the highest-priority
+                    // op available at that moment. Ops are picked one at a time, so a steady stream of
+                    // reads can't hold writes back until the read channel happens to drain.
+                    await globalConcurrency.WaitAsync(cancel);
 
-                    await Task.WhenAny(initWait, writeWait, readWait);
+                    QueuedOperation? operation;
+                    try
+                    {
+                        while ((operation = TryTakeNext()) is null)
+                        {
+                            initWait ??= initChannelReader.WaitToReadAsync(cancel).AsTask();
+                            writeWait ??= writeChannelReader.WaitToReadAsync(cancel).AsTask();
+                            readWait ??= readChannelReader.WaitToReadAsync(cancel).AsTask();
 
-                    // priority: init -> write -> read
-                    while (initChannelReader.TryRead(out var initOperation))
-                        await DispatchAsync(initOperation, cancel);
+                            await Task.WhenAny(initWait, writeWait, readWait);
+                            cancel.ThrowIfCancellationRequested();
 
-                    while (writeChannelReader.TryRead(out var writeOperation))
-                        await DispatchAsync(writeOperation, cancel);
+                            if (initWait.IsCompleted) initWait = null;
+                            if (writeWait.IsCompleted) writeWait = null;
+                            if (readWait.IsCompleted) readWait = null;
+                        }
+                    }
+                    catch
+                    {
+                        // don't leak the slot, or Dispose waits out its drain timeout for it
+                        globalConcurrency.Release();
+                        throw;
+                    }
 
-                    while (readChannelReader.TryRead(out var readOperation))
-                        await DispatchAsync(readOperation, cancel);
-
-                    if (initWait.IsCompleted) initWait = null;
-                    if (writeWait.IsCompleted) writeWait = null;
-                    if (readWait.IsCompleted) readWait = null;
+                    Dispatch(operation, cancel);
                 }
             }
             catch (OperationCanceledException) when (cancel.IsCancellationRequested)
@@ -255,47 +292,90 @@ namespace Logix.Tags
             }
         }
 
-        // Acquire a global slot, then start the actual operation work as a fire-and-forget task.
-        // The consumer loop only blocks on the global semaphore — once a slot is acquired it
-        // moves on to the next op, so cross-tag work proceeds in parallel.
-        private async Task DispatchAsync(QueuedOperation operation, CancellationToken cancel)
+        // Returns the highest-priority runnable op (init -> write -> read), or null if none.
+        // Superseded/flushed ops are dropped and ops for busy tags are parked — neither consumes
+        // the slot the caller is holding.
+        private QueuedOperation? TryTakeNext()
         {
-            try
+            while (TryReadByPriority(out var operation))
             {
-                await globalConcurrency.WaitAsync(cancel);
-            }
-            catch (OperationCanceledException)
-            {
-                operation.CompletionSource.TrySetCanceled(cancel);
-                RemoveIfCurrent(operation);
-                return;
+                if (operation.CompletionSource.Task.IsCompleted)
+                {
+                    RemoveIfCurrent(operation);
+                    continue;
+                }
+
+                lock (tagStateLock)
+                {
+                    if (busyTags.Add(operation.TagName))
+                        return operation;
+
+                    if (!parkedOperations.TryGetValue(operation.TagName, out var parked))
+                        parkedOperations[operation.TagName] = parked = new List<QueuedOperation>();
+                    parked.Add(operation);
+                }
             }
 
+            return null;
+        }
+
+        private bool TryReadByPriority(out QueuedOperation operation)
+        {
+            if (initChannelReader.TryRead(out var initOperation)) { operation = initOperation; return true; }
+            if (writeChannelReader.TryRead(out var writeOperation)) { operation = writeOperation; return true; }
+            if (readChannelReader.TryRead(out var readOperation)) { operation = readOperation; return true; }
+            operation = null!;
+            return false;
+        }
+
+        // Runs the op in the background; the caller has already taken its global slot and marked
+        // its tag busy. Both are released on completion, parked ops for the tag first, so they're
+        // back in their channels before the consumer loop can pick up the freed slot.
+        private void Dispatch(QueuedOperation operation, CancellationToken cancel)
+        {
             _ = Task.Run(async () =>
             {
-                var tagLock = perTagLocks.GetOrAdd(operation.TagName, _ => new SemaphoreSlim(1, 1));
                 try
                 {
-                    await tagLock.WaitAsync(cancel);
-                    try
-                    {
-                        await ProcessOperation(operation, cancel);
-                    }
-                    finally
-                    {
-                        tagLock.Release();
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    operation.CompletionSource.TrySetCanceled(cancel);
-                    RemoveIfCurrent(operation);
+                    await ProcessOperation(operation, cancel);
                 }
                 finally
                 {
+                    ReleaseTag(operation.TagName);
                     globalConcurrency.Release();
                 }
             });
+        }
+
+        private void ReleaseTag(string tagName)
+        {
+            List<QueuedOperation>? parked;
+            lock (tagStateLock)
+            {
+                busyTags.Remove(tagName);
+                parkedOperations.Remove(tagName, out parked);
+            }
+
+            if (parked is null)
+                return;
+
+            foreach (var operation in parked)
+            {
+                var requeued = operation switch
+                {
+                    InitializeOperation initOperation => initChannelWriter.TryWrite(initOperation),
+                    WriteOperation writeOperation => writeChannelWriter.TryWrite(writeOperation),
+                    ReadOperation readOperation => readChannelWriter.TryWrite(readOperation),
+                    _ => false
+                };
+
+                // channels are completed during Dispose
+                if (!requeued)
+                {
+                    operation.CompletionSource.TrySetCanceled();
+                    RemoveIfCurrent(operation);
+                }
+            }
         }
 
         // Remove the op from the pending dict only if it's still the one tracked under that key.
@@ -320,27 +400,48 @@ namespace Logix.Tags
 
         private async Task ProcessOperation(QueuedOperation operation, CancellationToken cancel)
         {
+            // Superseded (coalesced) or flushed ops already have a completed TCS, so nobody is
+            // waiting on the result — skip the round trip instead of spending it on the wire.
+            // RemoveIfCurrent is a no-op when a replacement op now holds the key, which is the
+            // usual case here.
+            if (operation.CompletionSource.Task.IsCompleted)
+            {
+                RemoveIfCurrent(operation);
+                return;
+            }
+
             try
             {
                 switch (operation)
                 {
+                    // Buffer access happens here, while this op is the only one in flight for its tag,
+                    // so reads can't be torn and a pending write's data can't be overwritten by a read.
                     case ReadOperation readOp:
                         await readOp.Tag.ReadAsync(cancel);
                         MarkActivity();
-                        readOp.CompletionSource.TrySetResult(readOp.Tag);
+                        readOp.CompletionSource.TrySetResult(new TagSnapshot(readOp.Tag, readOp.Tag.GetBuffer()));
                         break;
 
                     case InitializeOperation initOp:
                         if (!initOp.Tag.IsInitialized)
                             await initOp.Tag.InitializeAsync(cancel);
                         MarkActivity();
-                        initOp.CompletionSource.TrySetResult(initOp.Tag);
+                        initOp.CompletionSource.TrySetResult(new TagSnapshot(initOp.Tag, Array.Empty<byte>()));
                         break;
 
                     case WriteOperation writeOp:
+                        var written = Array.Empty<byte>();
+                        if (writeOp.Encode is not null)
+                        {
+                            // start from the current buffer so bytes the encoder doesn't touch
+                            // (host bits of packed BOOLs, padding) keep their last-read values
+                            written = writeOp.Tag.GetBuffer();
+                            writeOp.Encode(written);
+                            writeOp.Tag.SetBuffer(written);
+                        }
                         await writeOp.Tag.WriteAsync(cancel);
                         MarkActivity();
-                        writeOp.CompletionSource.TrySetResult(writeOp.Tag);
+                        writeOp.CompletionSource.TrySetResult(new TagSnapshot(writeOp.Tag, written));
                         break;
                 }
             }
@@ -386,9 +487,7 @@ namespace Logix.Tags
                 pendingOperations.Clear();
             }
 
-            foreach (var tagLock in perTagLocks.Values)
-                tagLock.Dispose();
-            perTagLocks.Clear();
+            CancelParkedOperations();
 
             globalConcurrency.Dispose();
             consumerCts?.Dispose();

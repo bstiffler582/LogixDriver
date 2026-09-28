@@ -1,4 +1,4 @@
-﻿using libplctag;
+using libplctag;
 
 namespace Logix.Tags
 {
@@ -11,24 +11,24 @@ namespace Logix.Tags
             this.queue = queue;
         }
 
-        public Tag WriteTag(Tag tag)
+        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null)
         {
-            return queue.EnqueueWriteSync(tag);
+            return queue.EnqueueWriteSync(tag, encode).Tag;
         }
 
-        public async Task<Tag> WriteTagAsync(Tag tag)
+        public async Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null)
         {
-            return await queue.EnqueueWriteAsync(tag);
+            return (await queue.EnqueueWriteAsync(tag, encode)).Tag;
         }
 
         public Tag Initialize(Tag tag)
         {
-            return queue.EnqueueInitializeSync(tag);
+            return queue.EnqueueInitializeSync(tag).Tag;
         }
 
         public async Task<Tag> InitializeAsync(Tag tag)
         {
-            return await queue.EnqueueInitializeAsync(tag);
+            return (await queue.EnqueueInitializeAsync(tag)).Tag;
         }
     }
 }

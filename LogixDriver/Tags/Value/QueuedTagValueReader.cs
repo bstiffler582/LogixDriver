@@ -1,4 +1,4 @@
-﻿using Logix.Driver;
+using Logix.Driver;
 using libplctag;
 
 namespace Logix.Tags
@@ -14,26 +14,26 @@ namespace Logix.Tags
             this.queue = queue;
         }
 
-        public async Task<Tag> ReadTagAsync(Tag tag)
+        public async Task<byte[]> ReadBufferAsync(Tag tag)
         {
-            return await queue.EnqueueReadAsync(tag);
+            return (await queue.EnqueueReadAsync(tag)).Buffer;
         }
 
-        public Tag ReadTag(Tag tag)
+        public byte[] ReadBuffer(Tag tag)
         {
-            return ReadTagAsync(tag).GetAwaiter().GetResult();
+            return queue.EnqueueReadSync(tag).Buffer;
         }
 
         public async Task<Tag> ReadTagAsync(string tagName, int elementCount = 1)
         {
             var tag = tagFactory.Create(tagName, elementCount);
-            return await queue.EnqueueReadAsync(tag);
+            return (await queue.EnqueueReadAsync(tag)).Tag;
         }
 
         public Tag ReadTag(string tagName, int elementCount = 1)
         {
             var tag = tagFactory.Create(tagName, elementCount);
-            return queue.EnqueueReadSync(tag);
+            return queue.EnqueueReadSync(tag).Tag;
         }
     }
 }

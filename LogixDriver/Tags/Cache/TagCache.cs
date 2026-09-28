@@ -1,33 +1,34 @@
-﻿using libplctag;
+using libplctag;
+using System.Collections.Concurrent;
 
 namespace Logix.Tags
 {
     public interface ITagCache
     {
-        public void AddTag(string tagPath, Tag tag);
-        public bool TryGetTag(string tagPath, out Tag? tag);
+        public Tag GetOrAdd(string tagPath, Func<Tag> factory);
         public void Flush();
     }
 
     internal class TagCache : ITagCache
     {
-        private readonly Dictionary<string, Tag> tagCache = new();
+        // Lazy ensures the factory runs once per path even when concurrent callers race on a miss,
+        // so no orphaned native tag handles are created.
+        private readonly ConcurrentDictionary<string, Lazy<Tag>> tagCache = new();
 
-        public void AddTag(string tagPath, Tag tag)
+        public Tag GetOrAdd(string tagPath, Func<Tag> factory)
         {
-            tagCache.TryAdd(tagPath, tag);
-        }
+            if (tagCache.TryGetValue(tagPath, out var cached))
+                return cached.Value;
 
-        public bool TryGetTag(string tagPath, out Tag? tag)
-        {
-            return tagCache.TryGetValue(tagPath, out tag);
+            return tagCache.GetOrAdd(tagPath, _ => new Lazy<Tag>(factory)).Value;
         }
 
         public void Flush()
         {
             foreach (var tag in tagCache.Values)
             {
-                tag.Dispose();
+                if (tag.IsValueCreated)
+                    tag.Value.Dispose();
             }
 
             tagCache.Clear();

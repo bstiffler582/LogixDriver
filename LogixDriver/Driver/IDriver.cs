@@ -15,8 +15,17 @@ namespace Logix.Driver
         public Task<object?> ReadTagValueAsync(string tagName);
         public void WriteTagValue(string tagName, object value);
         public Task WriteTagValueAsync(string tagName, object value);
+        /// <summary>
+        /// Probes the controller now and starts background connection monitoring (if not already
+        /// running): heartbeat probes while connected, automatic reconnect with backoff while
+        /// disconnected. Subscribe to <see cref="ConnectionStateChanged"/> before the first call.
+        /// </summary>
         public Task<bool> TryConnectAsync(CancellationToken token = default);
         public bool TryConnect();
+        /// <summary>
+        /// Raised on the connection monitor's probe path, in order. Handlers should return quickly
+        /// and must not block on TryConnect/TryConnectAsync (the probe path is waiting on them).
+        /// </summary>
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
     }
 
