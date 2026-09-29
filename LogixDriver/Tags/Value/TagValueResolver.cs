@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections;
 using System.Text;
 using static Logix.Tags.TagMetaHelpers;
 
@@ -159,21 +160,18 @@ namespace Logix.Tags
                 if (definition.Children is null || definition.Children.Count < 1)
                     return;
 
-                // cast object value to array
-                object[]? arr = null;
-                if (value.GetType() == typeof(IEnumerable<>))
-                    arr = (value as IEnumerable<object>)?.ToArray();
-                else if (value is Array genericArray)
-                    arr = genericArray.Cast<object>().ToArray();
+                // any sequence works: arrays, List<object> (what ResolveValue returns), List<int>, etc.
+                if (value is string || value is not IEnumerable enumerable)
+                    throw new ArgumentException($"Write value for array tag {definition.Name} must be a sequence, got {value.GetType().Name}.");
 
-                if (arr is null) throw new Exception($"Unable to cast write value for array tag {definition.Name} to Enumerable.");
+                var arr = enumerable.Cast<object>().ToArray();
+                if (arr.Length != definition.Children.Count)
+                    throw new ArgumentException($"Write value for array tag {definition.Name} has {arr.Length} elements, expected {definition.Children.Count}.");
 
-                foreach (var c in definition.Children)
+                for (int i = 0; i < arr.Length; i++)
                 {
-                    {
-                        int.TryParse(c.Name, out var i);
-                        WriteTagBuffer(buffer, c, arr[i], MemberOffset(c, offset));
-                    }
+                    var c = definition.Children[i];
+                    WriteTagBuffer(buffer, c, arr[i], MemberOffset(c, offset));
                 }
             }
             else if (IsUdt(definition.TypeCode) && !definition.TypeName.Contains("STRING"))
@@ -181,18 +179,31 @@ namespace Logix.Tags
                 if (definition.Children is null || definition.Children.Count < 1)
                     return;
 
-                if (value.GetType() == typeof(IDictionary<string, object>))
+                foreach (var c in definition.Children)
                 {
-                    var dict = value as IDictionary<string, object>;
-                    if (dict is null) throw new Exception($"Unable to cast write value for tag {definition.Name} to Dictionary.");
-                    foreach (var c in definition.Children)
-                        WriteTagBuffer(buffer, c, dict[c.Name], MemberOffset(c, offset));
+                    // every member is required; a skipped member would write back whatever was last read
+                    if (!TryGetMemberValue(value, c.Name, out var memberValue))
+                        throw new ArgumentException($"Write value for tag {definition.Name} is missing member '{c.Name}'.");
+
+                    WriteTagBuffer(buffer, c, memberValue!, MemberOffset(c, offset));
                 }
             }
             else
             {
                 PrimitiveValueWriter(buffer, definition.TypeCode, value, offset);
             }
+        }
+
+        // accepts Dictionary<string, object> (what ResolveValue returns), ExpandoObject, or any other dictionary keyed by string
+        private static bool TryGetMemberValue(object value, string name, out object? memberValue)
+        {
+            memberValue = null;
+            if (value is IDictionary<string, object> generic)
+                return generic.TryGetValue(name, out memberValue) && memberValue is not null;
+            if (value is IDictionary nonGeneric)
+                return nonGeneric.Contains(name) && (memberValue = nonGeneric[name]) is not null;
+
+            throw new ArgumentException($"Write value for a UDT must be a dictionary keyed by member name, got {value.GetType().Name}.");
         }
 
         // BOOL members (UDT bits, BOOL array elements) are addressed by bit offset; everything else by byte

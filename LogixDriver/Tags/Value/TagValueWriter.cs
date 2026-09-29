@@ -7,9 +7,11 @@ namespace Logix.Tags
         /// <summary>
         /// Writes the tag. <paramref name="encode"/> (optional) receives a copy of the tag's current
         /// buffer to fill with the value; it's applied immediately before the write.
+        /// <paramref name="readModifyWrite"/> reads the tag first so encode starts from fresh data, for
+        /// writes that only change part of the buffer.
         /// </summary>
-        public Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null);
-        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null);
+        public Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
+        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
         public Task<Tag> InitializeAsync(Tag tag);
         public Tag Initialize(Tag tag);
     }
@@ -31,15 +33,19 @@ namespace Logix.Tags
             return tag;
         }
 
-        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null)
+        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
+            if (readModifyWrite)
+                tag.Read();
             ApplyEncode(tag, encode);
             tag.Write();
             return tag;
         }
 
-        public async Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null)
+        public async Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
+            if (readModifyWrite)
+                await tag.ReadAsync();
             ApplyEncode(tag, encode);
             await tag.WriteAsync();
             return tag;

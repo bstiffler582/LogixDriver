@@ -185,6 +185,7 @@ namespace Logix.Tags
                 }
 
                 var tagMembers = typeDef.Members?
+                    .Except(BoolHostMembers(typeDef.Members))
                     .Select(TagDefinition.FromTypeMemberDefinition)
                     .ToList();
 
@@ -207,6 +208,21 @@ namespace Logix.Tags
                 foreach (var child in tagDef.Children!)
                     await ExpandInternal(child, true);
             }
+        }
+
+        /// <summary>
+        /// Logix packs UDT BOOL members into hidden SINT "host" members (named ZZZZZZZZZZ...) at the same
+        /// byte offset. A host is storage for its BOOLs, not a value of its own: exposing it would let a
+        /// write of the stale host byte overwrite the BOOLs sharing it, so hosts are left out of the tree.
+        /// </summary>
+        private static IEnumerable<TypeMemberDefinition> BoolHostMembers(List<TypeMemberDefinition> members)
+        {
+            var boolOffsets = members
+                .Where(m => m.Code == (ushort)Code.BOOL)
+                .Select(m => m.Offset)
+                .ToHashSet();
+
+            return members.Where(m => m.Code == (ushort)Code.SINT && boolOffsets.Contains(m.Offset));
         }
 
         private void ExpandPrimitive(TagDefinition tagDef)

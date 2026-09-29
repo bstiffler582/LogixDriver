@@ -145,12 +145,10 @@ namespace Logix.Driver
                 if (!tag.IsInitialized)
                     tag = channel.Writer.Initialize(tag);
 
-                // BOOL array element: refresh the containing word so the other 31 bits are written back as-is
-                if (IsBoolArrayElement(tagName, definition))
-                    channel.Reader.ReadBuffer(tag);
-
-                // encoding runs inside the queue under the per-tag lock, not against the shared tag here
-                channel.Writer.WriteTag(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset));
+                // encoding runs inside the queue under the per-tag lock, not against the shared tag here.
+                // A BOOL array element only changes one bit of its word, so the word is re-read first.
+                channel.Writer.WriteTag(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset),
+                    readModifyWrite: IsBoolArrayElement(tagName, definition));
             }
             catch (Exception ex)
             {
@@ -172,12 +170,10 @@ namespace Logix.Driver
                 if (!tag.IsInitialized)
                     tag = await channel.Writer.InitializeAsync(tag);
 
-                // BOOL array element: refresh the containing word so the other 31 bits are written back as-is
-                if (IsBoolArrayElement(tagName, definition))
-                    await channel.Reader.ReadBufferAsync(tag);
-
-                // encoding runs inside the queue under the per-tag lock, not against the shared tag here
-                await channel.Writer.WriteTagAsync(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset));
+                // encoding runs inside the queue under the per-tag lock, not against the shared tag here.
+                // A BOOL array element only changes one bit of its word, so the word is re-read first.
+                await channel.Writer.WriteTagAsync(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset),
+                    readModifyWrite: IsBoolArrayElement(tagName, definition));
             }
             catch (Exception ex)
             {
@@ -215,10 +211,14 @@ namespace Logix.Driver
 
             if (IsBoolArrayElement(tagPath, definition))
             {
-                // Logix indexes BOOL arrays by 32-bit word; access the word holding this bit
+                // Logix indexes BOOL arrays by 32-bit word; access the word holding this bit.
+                // Cached by word path so all 32 bits share one Tag: their reads coalesce and their
+                // read-modify-writes serialize on it. No user path collides with the key, since any
+                // indexed path into a BOOL array is a bit path that lands here.
                 var arrayPath = tagPath[..tagPath.LastIndexOf('[')];
                 var wordIndex = definition.Offset / (TagMetaHelpers.BOOL_ARRAY_WORD_BITS / 8);
-                var wordTag = tagCache.GetOrAdd(tagPath, () => tagFactory.Create($"{arrayPath}[{wordIndex}]"));
+                var wordPath = $"{arrayPath}[{wordIndex}]";
+                var wordTag = tagCache.GetOrAdd(wordPath, () => tagFactory.Create(wordPath));
                 return (definition, wordTag, (int)definition.BitOffset);
             }
 
