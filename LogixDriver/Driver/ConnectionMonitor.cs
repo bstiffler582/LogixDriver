@@ -23,8 +23,7 @@ namespace Logix.Driver
 
         private readonly TimeSpan heartbeatInterval;
         private readonly TimeSpan probeTimeout;
-        private readonly ITagValueChannel channel;
-        private readonly Func<INativeTag> probeTagFactory;
+        private readonly ITagChannel channel;
         private readonly Action<bool> onStateChanged;
 
         private readonly SemaphoreSlim probeGate = new(1, 1);
@@ -34,7 +33,6 @@ namespace Logix.Driver
         private bool disposed;
 
         // guarded by probeGate
-        private INativeTag? probeTag;
         private int failedAttempts;
 
         // Environment.TickCount64 of the next reconnect attempt; written under probeGate, read by the loop
@@ -50,14 +48,12 @@ namespace Logix.Driver
         public ConnectionMonitor(
             TimeSpan heartbeatInterval,
             TimeSpan probeTimeout,
-            ITagValueChannel channel,
-            Func<INativeTag> probeTagFactory,
+            ITagChannel channel,
             Action<bool> onStateChanged)
         {
             this.heartbeatInterval = heartbeatInterval;
             this.probeTimeout = probeTimeout;
             this.channel = channel;
-            this.probeTagFactory = probeTagFactory;
             this.onStateChanged = onStateChanged;
         }
 
@@ -173,46 +169,20 @@ namespace Logix.Driver
 
         private async Task<string> ReadControllerInfoAsync(CancellationToken ct)
         {
-            INativeTag? tag = null;
-            Task? probe = null;
             try
             {
-                tag = probeTag ??= probeTagFactory();
-                probe = WriteProbeAsync(tag);
-
                 // bounded so a hung op can't stall monitoring; the op itself is still bounded by the tag timeout
-                await probe.WaitAsync(probeTimeout, ct).ConfigureAwait(false);
-                return TagMetaDecoder.DecodeControllerInfo(tag.GetBuffer());
+                var reply = await channel.RequestAsync("@raw", ProbePayload).WaitAsync(probeTimeout, ct).ConfigureAwait(false);
+                return TagMetaDecoder.DecodeControllerInfo(reply);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // Don't reuse a tag left failed or half-initialized; the next probe starts from a fresh one.
-                // Dispose only after its queued op has finished, since it may still be in flight after a timeout.
-                probeTag = null;
-                if (tag is not null)
-                {
-                    if (probe is null)
-                        tag.Dispose();
-                    else
-                        _ = probe.ContinueWith(_ => tag.Dispose(), TaskScheduler.Default);
-                }
-
-                if (ex is OperationCanceledException && ct.IsCancellationRequested)
-                    throw;
-
+                throw;
+            }
+            catch
+            {
                 return string.Empty;
             }
-        }
-
-        private async Task WriteProbeAsync(INativeTag tag)
-        {
-            if (!tag.IsInitialized)
-                await channel.Writer.InitializeAsync(tag).ConfigureAwait(false);
-
-            // Set outside the queue: only the monitor uses this tag, and probes are serialized by probeGate.
-            tag.SetBuffer(ProbePayload);
-
-            await channel.Writer.WriteTagAsync(tag).ConfigureAwait(false);
         }
 
         public void Dispose()
@@ -228,9 +198,6 @@ namespace Logix.Driver
             cts.Cancel();
             try { loop?.Wait(TimeSpan.FromSeconds(2)); }
             catch (AggregateException) { /* expected — OCE wrapped */ }
-
-            probeTag?.Dispose();
-            probeTag = null;
 
             cts.Dispose();
             probeGate.Dispose();

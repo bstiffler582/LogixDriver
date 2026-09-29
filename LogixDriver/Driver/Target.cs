@@ -17,6 +17,12 @@ namespace Logix.Driver
         /// </summary>
         public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.Zero;
 
+        /// <summary>
+        /// Most operations in flight against the controller at once. Queued writes always go before
+        /// queued reads. Higher values let libplctag pack more requests per round trip.
+        /// </summary>
+        public int MaxConcurrentOperations { get; set; } = 8;
+
         public Target(
             string name,
             string gateway,

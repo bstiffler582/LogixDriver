@@ -9,10 +9,12 @@ namespace LogixDriver.Tests.Fakes
     /// Serves metadata responses (@tags, Program:X.@tags, @udt/{id}) encoded the way a Logix
     /// controller returns them, and counts every raw read by name.
     /// </summary>
-    internal sealed class FakePlc : ITagValueReader
+    internal sealed class FakePlc : IRawTagReader
     {
         private readonly Dictionary<string, byte[]> responses = new();
         public ConcurrentDictionary<string, int> RawReads { get; } = new();
+        /// <summary>Delay before each response, so concurrent requests overlap.</summary>
+        public TimeSpan Delay { get; set; } = TimeSpan.Zero;
 
         public int ReadsOf(string name) => RawReads.TryGetValue(name, out var n) ? n : 0;
         public int TemplateReads => RawReads.Where(r => r.Key.StartsWith("@udt/")).Sum(r => r.Value);
@@ -28,16 +30,22 @@ namespace LogixDriver.Tests.Fakes
             return this;
         }
 
-        public Task<byte[]> ReadRawAsync(string tagName, int elementCount = 1)
+        public async Task<byte[]> ReadRawAsync(string tagName, int elementCount = 1)
         {
             RawReads.AddOrUpdate(tagName, 1, (_, n) => n + 1);
-            return responses.TryGetValue(tagName, out var data)
-                ? Task.FromResult((byte[])data.Clone())
-                : Task.FromException<byte[]>(new InvalidOperationException($"FakePlc has no response for '{tagName}'"));
+            if (Delay > TimeSpan.Zero)
+                await Task.Delay(Delay);
+            return TryGetResponse(tagName, out var data)
+                ? data
+                : throw new InvalidOperationException($"FakePlc has no response for '{tagName}'");
         }
 
-        public Task<byte[]> ReadBufferAsync(INativeTag tag) => throw new NotSupportedException();
-        public byte[] ReadBuffer(INativeTag tag) => throw new NotSupportedException();
+        public bool TryGetResponse(string name, out byte[] data)
+        {
+            var found = responses.TryGetValue(name, out var stored);
+            data = found ? (byte[])stored!.Clone() : Array.Empty<byte>();
+            return found;
+        }
 
         public static byte[] EncodeTagList(IEnumerable<TagEntry> tags)
         {

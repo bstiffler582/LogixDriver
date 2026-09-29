@@ -21,6 +21,26 @@ namespace Logix.Tags
         Status GetStatus();
     }
 
+    /// <summary>A native tag operation failed. <see cref="Status"/> is the tag's status after the failure.</summary>
+    public sealed class NativeTagException : Exception
+    {
+        public string TagName { get; }
+        public Status Status { get; }
+
+        public NativeTagException(string tagName, Status status, Exception inner)
+            : base($"{tagName}: {inner.Message} (status {status})", inner)
+        {
+            TagName = tagName;
+            Status = status;
+        }
+
+        /// <summary>The failure looks like lost communication rather than a problem with this tag.</summary>
+        public bool IsConnectionError =>
+            Status is Status.ErrorBadConnection or Status.ErrorTimeout or Status.ErrorWinsock or Status.Pending
+            // observed: an ErrorTimeout exception while the tag status is unrelated (e.g. NotFound)
+            || InnerException?.Message == "ErrorTimeout";
+    }
+
     internal sealed class LibPlcTag : INativeTag
     {
         private readonly Tag tag;

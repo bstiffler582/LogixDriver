@@ -16,52 +16,67 @@ dotnet add package LogixDriver
 
 ### Browse the controller tag database
 
-`LoadTagsAsync` queries the controller for its full tag list. An optional filter limits loading to tags whose names start with one of the provided prefixes.
+`LoadTagsAsync` reads the controller's tag list and fully resolves the data types of the tags you name, so they can be browsed. A program name loads all of that program's tags; no filter resolves everything.
 
 ```csharp
 using Logix.Driver;
+using Logix.Tags;
 
 var target = new Target("MyPLC", "192.168.1.10", "1,0");
 
 using var driver = Driver.Create(target);
 
 bool isConnected = await driver.TryConnectAsync();
-// await driver.LoadTagsAsync(); // loads all tag definitions
+// await driver.LoadTagsAsync(); // resolves every tag and program
 
-// load filtered tag definitions
+// resolve two programs for browsing
 await driver.LoadTagsAsync([ "Program:HMI_A", "Program:HMI_B" ]);
 
-// output flat map of tag paths and types
-foreach (var (path, definition) in driver.GetTagDefinitionsFlat())
-    Console.WriteLine($"{path}  [{definition.TypeName}]");
+// the controller's top level, in controller order: controller tags and programs
+foreach (var node in driver.Tags.GetLoadedTags())
+{
+    switch (node)
+    {
+        case TagInfo tag:
+            Print(tag);
+            break;
+        case ProgramInfo { IsLoaded: true } program:
+            foreach (var tag in program.Tags!)
+                Print(tag);
+            break;
+        case ProgramInfo program:
+            Console.WriteLine($"{program.Name}  (not loaded)");
+            break;
+    }
+}
 
-// gets loaded root tags, hierarchical representation
-var definitions = driver.GetTagDefinitions();
+static void Print(TagInfo tag)
+{
+    Console.WriteLine($"{tag.Path}  [{tag.Type}]");
 
-// access child members
-var tagDef = definitions.First();
-foreach (var member in tagDef.Children!)
-    Console.WriteLine(member.Name);
-
+    // walk a resolved type; ElementType is null where the type hasn't been loaded
+    if (tag.Type.ElementType is StructType structType)
+        foreach (var member in structType.Members)
+            Console.WriteLine($"{tag.Path}.{member.Name}  [{member.Type}]");
+}
 ```
 
-For large programs, or code with deeply nested types, loading *all* tag metadata will require many successive reads. This is because all tag instance definitions are recursively "deep" resolved unless a filter is provided.
+Data types are resolved once per type, not per tag: every tag and member of a given UDT shares one `StructType`, read from the controller once. A `TypeRef` whose `ElementType` is still null belongs to a type that hasn't been read yet.
 
-For instance:
+For large programs, or code with deeply nested types, resolving *everything* takes one read per distinct type. A filter limits that to what you need:
+
 ```csharp
 await driver.LoadTagsAsync([ "Program:HMI_A" ]);
-// Shallow resolves all controller tag definitions
-// deep resolves all defintions within Program:HMI_A
+// lists all controller tags and programs (names and type ids only)
+// resolves every type used by Program:HMI_A
 ```
 ```csharp
 await driver.LoadTagsAsync([ "Program:HMI_A.MyHmiUdt" ]);
-// Shallow resolves all controller tags
-// shallow resolves all tags in Program:HMI_A
-// deep resolves only the MyHmiUdt definition
+// lists all controller tags and programs, and Program:HMI_A's tags
+// resolves only the types MyHmiUdt contains
 ```
 
-
-Tags can still be read/written with no preceding call to `LoadTags`/`LoadTagsAsync`. Their definitions will be progressively resolved on demand.
+Tags can be read and written with no preceding `LoadTags`/`LoadTagsAsync`. A path resolves on first use, reading only the types along it (plus the target's own types), and the result is cached.
 
 ### Read/write a tag values
 
