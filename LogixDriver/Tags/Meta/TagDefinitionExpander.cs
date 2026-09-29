@@ -91,6 +91,12 @@ namespace Logix.Tags
 
         private async Task ExpandArray(TagDefinition tagDef, bool deep)
         {
+            if (IsBoolArray(tagDef.TypeCode))
+            {
+                ExpandBoolArray(tagDef);
+                return;
+            }
+
             var baseTypeCode = GetArrayBaseType(tagDef.TypeCode);
             var baseTag = new TagDefinition(tagDef) { TypeCode = baseTypeCode };
             await ExpandInternal(baseTag, deep);
@@ -102,6 +108,37 @@ namespace Logix.Tags
             tagDef.TypeName = arrayNode.TypeName;
             tagDef.Dimensions = arrayNode.Dimensions;
             tagDef.Children = arrayNode.Children;
+        }
+
+        /// <summary>
+        /// Logix reports BOOL[n] as an array of n/32 DWORDs. Re-shape it as n BOOL elements,
+        /// each addressed by the byte offset of its containing word plus the bit within that word.
+        /// </summary>
+        private static void ExpandBoolArray(TagDefinition tagDef)
+        {
+            // already expanded; Dimensions are in bits now, so re-running would scale them again
+            if (tagDef.Children is not null)
+                return;
+
+            var words = tagDef.Dimensions?.Where(n => n > 0).Aggregate(1u, (a, n) => a * n) ?? 0;
+            var bits = (int)words * BOOL_ARRAY_WORD_BITS;
+            const int wordBytes = BOOL_ARRAY_WORD_BITS / 8;
+
+            tagDef.Length = words * wordBytes;
+            tagDef.TypeName = $"ARRAY[{bits}] OF BOOL";
+            tagDef.Dimensions = [(uint)bits];
+            tagDef.Children = Enumerable.Range(0, bits)
+                .Select(i => new TagDefinition(
+                    $"{i}",
+                    (ushort)Code.BOOL,
+                    GetTypeLength((ushort)Code.BOOL),
+                    (uint)(i / BOOL_ARRAY_WORD_BITS * wordBytes),
+                    (uint)(i % BOOL_ARRAY_WORD_BITS),
+                    ResolveTypeName((ushort)Code.BOOL))
+                {
+                    ExpansionLevel = ExpansionLevel.Deep
+                })
+                .ToList();
         }
 
         private TagDefinition BuildArrayType(TagDefinition rootTag, TagDefinition baseTag, uint[]? dims, int idx = 0)

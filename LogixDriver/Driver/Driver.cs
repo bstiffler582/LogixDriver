@@ -92,12 +92,12 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            var (definition, tag) = GetTagAsync(tagName).GetAwaiter().GetResult();
+            var (definition, tag, offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
 
             try
             {
                 var buffer = channel.Reader.ReadBuffer(tag);
-                return valueResolver.ResolveValue(buffer, definition);
+                return valueResolver.ResolveValue(buffer, definition, offset);
             }
             catch (Exception ex)
             {
@@ -115,12 +115,12 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            var (definition, tag) = await GetTagAsync(tagName);
+            var (definition, tag, offset) = await GetTagAsync(tagName);
 
             try
             {
                 var buffer = await channel.Reader.ReadBufferAsync(tag);
-                return valueResolver.ResolveValue(buffer, definition);
+                return valueResolver.ResolveValue(buffer, definition, offset);
             }
             catch (Exception ex)
             {
@@ -138,15 +138,19 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            var (definition, tag) = GetTagAsync(tagName).GetAwaiter().GetResult();
+            var (definition, tag, offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
 
             try
             {
                 if (!tag.IsInitialized)
                     tag = channel.Writer.Initialize(tag);
 
+                // BOOL array element: refresh the containing word so the other 31 bits are written back as-is
+                if (IsBoolArrayElement(tagName, definition))
+                    channel.Reader.ReadBuffer(tag);
+
                 // encoding runs inside the queue under the per-tag lock, not against the shared tag here
-                channel.Writer.WriteTag(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value));
+                channel.Writer.WriteTag(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset));
             }
             catch (Exception ex)
             {
@@ -161,15 +165,19 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            var (definition, tag) = await GetTagAsync(tagName);
+            var (definition, tag, offset) = await GetTagAsync(tagName);
 
             try
             {
                 if (!tag.IsInitialized)
                     tag = await channel.Writer.InitializeAsync(tag);
 
+                // BOOL array element: refresh the containing word so the other 31 bits are written back as-is
+                if (IsBoolArrayElement(tagName, definition))
+                    await channel.Reader.ReadBufferAsync(tag);
+
                 // encoding runs inside the queue under the per-tag lock, not against the shared tag here
-                await channel.Writer.WriteTagAsync(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value));
+                await channel.Writer.WriteTagAsync(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset));
             }
             catch (Exception ex)
             {
@@ -195,7 +203,9 @@ namespace Logix.Driver
             return (status || msg == "ErrorTimeout");
         }
 
-        private async Task<(TagDefinition, Tag)> GetTagAsync(string tagPath)
+        /// <returns>The definition, its libplctag tag, and the offset to resolve the value at
+        /// (a bit offset for BOOL array elements, otherwise 0)</returns>
+        private async Task<(TagDefinition, Tag, int)> GetTagAsync(string tagPath)
         {
             if (!metaProvider.TryGetTagDefinition(tagPath, out var definition) || definition!.ExpansionLevel != ExpansionLevel.Deep)
                 definition = await metaProvider.LoadTagDefinitionAsync(tagPath);
@@ -203,12 +213,25 @@ namespace Logix.Driver
             if (definition is null)
                 throw new KeyNotFoundException($"Unable to load tag definition for {tagPath}.");
 
+            if (IsBoolArrayElement(tagPath, definition))
+            {
+                // Logix indexes BOOL arrays by 32-bit word; access the word holding this bit
+                var arrayPath = tagPath[..tagPath.LastIndexOf('[')];
+                var wordIndex = definition.Offset / (TagMetaHelpers.BOOL_ARRAY_WORD_BITS / 8);
+                var wordTag = tagCache.GetOrAdd(tagPath, () => tagFactory.Create($"{arrayPath}[{wordIndex}]"));
+                return (definition, wordTag, (int)definition.BitOffset);
+            }
+
             var tag = tagCache.GetOrAdd(tagPath, () => definition.IsArray
                 ? tagFactory.Create(ResolveArrayPath(tagPath, definition), definition.ElementCount())
                 : tagFactory.Create(tagPath));
 
-            return (definition, tag);
+            return (definition, tag, 0);
         }
+
+        // a BOOL reached by index can only be a BOOL array element (UDT bits are reached by member name)
+        private static bool IsBoolArrayElement(string tagPath, TagDefinition definition) =>
+            definition.TypeCode == (ushort)TagMetaHelpers.Code.BOOL && tagPath.EndsWith(']');
 
         private static string ResolveArrayPath(string tagName, TagDefinition definition)
         {

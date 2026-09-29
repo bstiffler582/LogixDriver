@@ -60,12 +60,18 @@ namespace Logix
 
         public bool IsArray => IsArray(TypeCode);
         public bool IsPrimitive => IsPrimitive(TypeCode);
+        /// <summary>
+        /// Number of elements as the controller counts them (the element count to request on read/write).
+        /// For BOOL arrays that's 32-bit words, not bits.
+        /// </summary>
         public int ElementCount()
         {
             if (Dimensions is null || Dimensions.Length == 0) return 1;
             long prod = 1;
             foreach (var d in Dimensions)
                 prod = prod * Math.Max(1, (long)d);
+            if (IsBoolArray(TypeCode))
+                prod = (prod + BOOL_ARRAY_WORD_BITS - 1) / BOOL_ARRAY_WORD_BITS;
             return (int)Math.Max(1, prod);
         }
     }

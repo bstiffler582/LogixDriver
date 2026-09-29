@@ -25,13 +25,13 @@ namespace Logix.Tags
             {
                 Code.BOOL => GetBit(buffer, offset),
                 Code.SINT => (sbyte)buffer[offset],
-                Code.USINT or Code.BYTE => buffer[offset],
+                Code.USINT => buffer[offset],
                 Code.INT => BinaryPrimitives.ReadInt16LittleEndian(buffer.AsSpan(offset)),
-                Code.UINT or Code.WORD => BinaryPrimitives.ReadUInt16LittleEndian(buffer.AsSpan(offset)),
+                Code.UINT => BinaryPrimitives.ReadUInt16LittleEndian(buffer.AsSpan(offset)),
                 Code.DINT => BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(offset)),
-                Code.UDINT or Code.DWORD => BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(offset)),
+                Code.UDINT => BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(offset)),
                 Code.LINT => BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(offset)),
-                Code.ULINT or Code.LWORD => BinaryPrimitives.ReadUInt64LittleEndian(buffer.AsSpan(offset)),
+                Code.ULINT => BinaryPrimitives.ReadUInt64LittleEndian(buffer.AsSpan(offset)),
                 Code.REAL => BinaryPrimitives.ReadSingleLittleEndian(buffer.AsSpan(offset)),
                 Code.LREAL => BinaryPrimitives.ReadDoubleLittleEndian(buffer.AsSpan(offset)),
                 Code.STRING or Code.STRING2 or Code.STRINGI or Code.STRINGN or Code.STRING_STRUCT
@@ -52,25 +52,25 @@ namespace Logix.Tags
                 case Code.SINT:
                     buffer[offset] = unchecked((byte)Convert.ToSByte(value));
                     break;
-                case Code.USINT or Code.BYTE:
+                case Code.USINT:
                     buffer[offset] = Convert.ToByte(value);
                     break;
                 case Code.INT:
                     BinaryPrimitives.WriteInt16LittleEndian(buffer.AsSpan(offset), Convert.ToInt16(value));
                     break;
-                case Code.UINT or Code.WORD:
+                case Code.UINT:
                     BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(offset), Convert.ToUInt16(value));
                     break;
                 case Code.DINT:
                     BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(offset), Convert.ToInt32(value));
                     break;
-                case Code.UDINT or Code.DWORD:
+                case Code.UDINT:
                     BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset), Convert.ToUInt32(value));
                     break;
                 case Code.LINT:
                     BinaryPrimitives.WriteInt64LittleEndian(buffer.AsSpan(offset), Convert.ToInt64(value));
                     break;
-                case Code.ULINT or Code.LWORD:
+                case Code.ULINT:
                     BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(offset), Convert.ToUInt64(value));
                     break;
                 case Code.REAL:
@@ -131,7 +131,7 @@ namespace Logix.Tags
 
                 var ret = new List<object>();
                 foreach (var m in definition.Children)
-                    ret.Add(ResolveValue(buffer, m, offset + (int)m.Offset));
+                    ret.Add(ResolveValue(buffer, m, MemberOffset(m, offset)));
 
                 return ret;
             }
@@ -142,12 +142,7 @@ namespace Logix.Tags
 
                 var ret = new Dictionary<string, object>();
                 foreach (var c in definition.Children)
-                {
-                    if (c.TypeCode == (ushort)Code.BOOL)
-                        ret[c.Name] = ResolveValue(buffer, c, ((offset + (int)c.Offset) * 8) + (int)c.BitOffset);
-                    else
-                        ret[c.Name] = ResolveValue(buffer, c, offset + (int)c.Offset);
-                }
+                    ret[c.Name] = ResolveValue(buffer, c, MemberOffset(c, offset));
 
                 return ret;
             }
@@ -177,7 +172,7 @@ namespace Logix.Tags
                 {
                     {
                         int.TryParse(c.Name, out var i);
-                        WriteTagBuffer(buffer, c, arr[i], offset + (int)c.Offset);
+                        WriteTagBuffer(buffer, c, arr[i], MemberOffset(c, offset));
                     }
                 }
             }
@@ -191,12 +186,7 @@ namespace Logix.Tags
                     var dict = value as IDictionary<string, object>;
                     if (dict is null) throw new Exception($"Unable to cast write value for tag {definition.Name} to Dictionary.");
                     foreach (var c in definition.Children)
-                    {
-                        if (c.TypeCode == (ushort)Code.BOOL)
-                            WriteTagBuffer(buffer, c, dict[c.Name], ((offset + (int)c.Offset) * 8) + (int)c.BitOffset);
-                        else
-                            WriteTagBuffer(buffer, c, dict[c.Name], offset + (int)c.Offset);
-                    }
+                        WriteTagBuffer(buffer, c, dict[c.Name], MemberOffset(c, offset));
                 }
             }
             else
@@ -204,5 +194,11 @@ namespace Logix.Tags
                 PrimitiveValueWriter(buffer, definition.TypeCode, value, offset);
             }
         }
+
+        // BOOL members (UDT bits, BOOL array elements) are addressed by bit offset; everything else by byte
+        private static int MemberOffset(TagDefinition member, int offset) =>
+            member.TypeCode == (ushort)Code.BOOL
+                ? ((offset + (int)member.Offset) * 8) + (int)member.BitOffset
+                : offset + (int)member.Offset;
     }
 }
