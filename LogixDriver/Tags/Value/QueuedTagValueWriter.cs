@@ -11,22 +11,22 @@ namespace Logix.Tags
             this.queue = queue;
         }
 
-        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
+        public INativeTag WriteTag(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
             return queue.EnqueueWriteSync(tag, encode, readModifyWrite).Tag;
         }
 
-        public async Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
+        public async Task<INativeTag> WriteTagAsync(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
             return (await queue.EnqueueWriteAsync(tag, encode, readModifyWrite).ConfigureAwait(false)).Tag;
         }
 
-        public Tag Initialize(Tag tag)
+        public INativeTag Initialize(INativeTag tag)
         {
             return queue.EnqueueInitializeSync(tag).Tag;
         }
 
-        public async Task<Tag> InitializeAsync(Tag tag)
+        public async Task<INativeTag> InitializeAsync(INativeTag tag)
         {
             return (await queue.EnqueueInitializeAsync(tag).ConfigureAwait(false)).Tag;
         }

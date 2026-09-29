@@ -70,8 +70,8 @@ namespace Logix.Tags
         {
             if (tagDef.ExpansionLevel == ExpansionLevel.None)
             {
-                var programMetaTag = await reader.ReadTagAsync($"{tagDef.Name}.@tags").ConfigureAwait(false);
-                var progTagInfos = metaDecoder.DecodeTagList(programMetaTag!);
+                var programTagList = await reader.ReadRawAsync($"{tagDef.Name}.@tags").ConfigureAwait(false);
+                var progTagInfos = metaDecoder.DecodeTagList(programTagList);
 
                 var programTags = progTagInfos
                     .Where(t => !IsSystem(t.TypeCode))
@@ -192,8 +192,8 @@ namespace Logix.Tags
                     typeDef = cached;
                 else
                 {
-                    var typeMetaTag = await reader.ReadTagAsync($"@udt/{udtId}").ConfigureAwait(false);
-                    typeDef = metaDecoder.DecodeUdtMeta(typeMetaTag!);
+                    var template = await reader.ReadRawAsync($"@udt/{udtId}").ConfigureAwait(false);
+                    typeDef = metaDecoder.DecodeUdtMeta(template);
                 }
 
                 var tagMembers = typeDef.Members?

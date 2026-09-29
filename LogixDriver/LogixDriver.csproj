@@ -42,4 +42,8 @@
     <PackageReference Include="libplctag" Version="1.5.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="LogixDriver.Tests" />
+  </ItemGroup>
+
 </Project>

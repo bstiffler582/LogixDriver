@@ -1,5 +1,3 @@
-using libplctag;
-
 namespace Logix.Tags
 {
     public interface ITagValueWriter
@@ -10,55 +8,9 @@ namespace Logix.Tags
         /// <paramref name="readModifyWrite"/> reads the tag first so encode starts from fresh data, for
         /// writes that only change part of the buffer.
         /// </summary>
-        public Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
-        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
-        public Task<Tag> InitializeAsync(Tag tag);
-        public Tag Initialize(Tag tag);
-    }
-
-    internal class TagValueWriter : ITagValueWriter
-    {
-        public Tag Initialize(Tag tag)
-        {
-            if (!tag.IsInitialized)
-                tag.Initialize();
-            return tag;
-        }
-
-        public async Task<Tag> InitializeAsync(Tag tag)
-        {
-            if (!tag.IsInitialized)
-                await tag.InitializeAsync().ConfigureAwait(false);
-
-            return tag;
-        }
-
-        public Tag WriteTag(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
-        {
-            if (readModifyWrite)
-                tag.Read();
-            ApplyEncode(tag, encode);
-            tag.Write();
-            return tag;
-        }
-
-        public async Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
-        {
-            if (readModifyWrite)
-                await tag.ReadAsync().ConfigureAwait(false);
-            ApplyEncode(tag, encode);
-            await tag.WriteAsync().ConfigureAwait(false);
-            return tag;
-        }
-
-        private static void ApplyEncode(Tag tag, Action<byte[]>? encode)
-        {
-            if (encode is null)
-                return;
-
-            var buffer = tag.GetBuffer();
-            encode(buffer);
-            tag.SetBuffer(buffer);
-        }
+        public Task<INativeTag> WriteTagAsync(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
+        public INativeTag WriteTag(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
+        public Task<INativeTag> InitializeAsync(INativeTag tag);
+        public INativeTag Initialize(INativeTag tag);
     }
 }

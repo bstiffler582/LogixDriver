@@ -5,7 +5,7 @@ namespace Logix.Tags
 {
     public interface ITagFactory
     {
-        Tag Create(string name, int elementCount = 1);
+        INativeTag Create(string name, int elementCount = 1);
     }
 
     public class TagFactory : ITagFactory
@@ -14,7 +14,7 @@ namespace Logix.Tags
 
         public TagFactory(Target target) => this.target = target;
 
-        public Tag Create(string name, int elementCount = 1) => new Tag
+        public INativeTag Create(string name, int elementCount = 1) => new LibPlcTag(new Tag
         {
             Gateway = target.Gateway,
             Path = target.Path,
@@ -23,6 +23,6 @@ namespace Logix.Tags
             Name = name,
             ElementCount = elementCount,
             Timeout = TimeSpan.FromMilliseconds(target.TimeoutMs)
-        };
+        });
     }
 }

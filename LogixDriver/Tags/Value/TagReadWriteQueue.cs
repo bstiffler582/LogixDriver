@@ -9,21 +9,21 @@ namespace Logix.Tags
     /// Reads: the data read. Writes: the data written. Initialize: empty.
     /// The buffer may be shared between coalesced readers — treat it as read-only.
     /// </summary>
-    public readonly record struct TagSnapshot(Tag Tag, byte[] Buffer);
+    public readonly record struct TagSnapshot(INativeTag Tag, byte[] Buffer);
 
     public interface ITagReadWriteQueue : IDisposable
     {
-        public Task<TagSnapshot> EnqueueReadAsync(Tag tag);
-        public TagSnapshot EnqueueReadSync(Tag tag);
-        public Task<TagSnapshot> EnqueueInitializeAsync(Tag tag);
-        public TagSnapshot EnqueueInitializeSync(Tag tag);
+        public Task<TagSnapshot> EnqueueReadAsync(INativeTag tag);
+        public TagSnapshot EnqueueReadSync(INativeTag tag);
+        public Task<TagSnapshot> EnqueueInitializeAsync(INativeTag tag);
+        public TagSnapshot EnqueueInitializeSync(INativeTag tag);
         // encode (optional) receives a copy of the tag's current buffer and fills in the value to write.
         // It runs under the per-tag lock, immediately before the write.
         // readModifyWrite: read the tag first, in the same per-tag slot, so encode starts from fresh data.
         // For writes that only touch part of the buffer (e.g. one bit of a BOOL array word). These
         // writes are never coalesced, since each one carries a different partial change.
-        public Task<TagSnapshot> EnqueueWriteAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
-        public TagSnapshot EnqueueWriteSync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
+        public Task<TagSnapshot> EnqueueWriteAsync(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
+        public TagSnapshot EnqueueWriteSync(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false);
         public void Flush();
         // Environment.TickCount64-style timestamp of the last successful op. 0 if none.
         public long LastActivityAt { get; }
@@ -33,19 +33,19 @@ namespace Logix.Tags
     /// Producer/consumer queues for managing async tag read/write operations.
     /// A single consumer loop dispatches ops by priority (init -> write -> read), running up to
     /// maxConcurrency in parallel with at most one in flight per tag.
-    /// Ops are keyed by Tag instance, not name: two Tags can share a name but differ in element
+    /// Ops are keyed by INativeTag instance, not name: two Tags can share a name but differ in element
     /// count (e.g. a whole array and its first element are both "Arr[0]").
     /// </summary>
     internal class TagReadWriteQueue : ITagReadWriteQueue
     {
-        private abstract record QueuedOperation(Tag Tag)
+        private abstract record QueuedOperation(INativeTag Tag)
         {
             public TaskCompletionSource<TagSnapshot> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
-        private sealed record ReadOperation(Tag Tag) : QueuedOperation(Tag);
-        private sealed record WriteOperation(Tag Tag, Action<byte[]>? Encode, bool ReadModifyWrite) : QueuedOperation(Tag);
-        private sealed record InitializeOperation(Tag Tag) : QueuedOperation(Tag);
+        private sealed record ReadOperation(INativeTag Tag) : QueuedOperation(Tag);
+        private sealed record WriteOperation(INativeTag Tag, Action<byte[]>? Encode, bool ReadModifyWrite) : QueuedOperation(Tag);
+        private sealed record InitializeOperation(INativeTag Tag) : QueuedOperation(Tag);
 
         private readonly ChannelWriter<ReadOperation> readChannelWriter;
         private readonly ChannelReader<ReadOperation> readChannelReader;
@@ -57,8 +57,8 @@ namespace Logix.Tags
         private Task? consumerTask;
         private CancellationTokenSource? consumerCts;
 
-        // Track pending operations by type and tag to prevent duplicates (Tag is sealed with reference equality)
-        private readonly Dictionary<(Type Kind, Tag Tag), QueuedOperation> pendingOperations = new();
+        // Track pending operations by type and tag to prevent duplicates (INativeTag is sealed with reference equality)
+        private readonly Dictionary<(Type Kind, INativeTag Tag), QueuedOperation> pendingOperations = new();
 
         // Caps total in-flight ops against libplctag.
         private readonly SemaphoreSlim globalConcurrency;
@@ -68,8 +68,8 @@ namespace Logix.Tags
         // tag are parked here — without holding a global slot — and re-queued when the tag's current
         // op completes. Cross-tag ops run in parallel up to the global concurrency cap.
         private readonly object tagStateLock = new();
-        private readonly HashSet<Tag> busyTags = new(ReferenceEqualityComparer.Instance);
-        private readonly Dictionary<Tag, List<QueuedOperation>> parkedOperations = new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<INativeTag> busyTags = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<INativeTag, List<QueuedOperation>> parkedOperations = new(ReferenceEqualityComparer.Instance);
 
         // Activity tracking: timestamp (Environment.TickCount64) of the last successful op.
         // Exposed for external liveness monitoring; the queue itself does no idle detection.
@@ -115,7 +115,7 @@ namespace Logix.Tags
         /// Enqueue a read operation and return the value asynchronously.
         /// If a read for the same tag is already pending, returns the existing task.
         /// </summary>
-        public Task<TagSnapshot> EnqueueReadAsync(Tag tag)
+        public Task<TagSnapshot> EnqueueReadAsync(INativeTag tag)
         {
             lock (pendingOperations)
             {
@@ -137,13 +137,13 @@ namespace Logix.Tags
         /// <summary>
         /// Enqueue a read operation and wait synchronously for the result
         /// </summary>
-        public TagSnapshot EnqueueReadSync(Tag tag)
+        public TagSnapshot EnqueueReadSync(INativeTag tag)
         {
             var task = EnqueueReadAsync(tag);
             return task.GetAwaiter().GetResult();
         }
 
-        public Task<TagSnapshot> EnqueueInitializeAsync(Tag tag)
+        public Task<TagSnapshot> EnqueueInitializeAsync(INativeTag tag)
         {
             lock (pendingOperations)
             {
@@ -165,7 +165,7 @@ namespace Logix.Tags
             }
         }
 
-        public TagSnapshot EnqueueInitializeSync(Tag tag)
+        public TagSnapshot EnqueueInitializeSync(INativeTag tag)
         {
             var task = EnqueueInitializeAsync(tag);
             return task.GetAwaiter().GetResult();
@@ -176,7 +176,7 @@ namespace Logix.Tags
         /// Newer writes to the same tag replace older pending writes, except read-modify-writes,
         /// which each run in order.
         /// </summary>
-        public Task<TagSnapshot> EnqueueWriteAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
+        public Task<TagSnapshot> EnqueueWriteAsync(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
             var operation = new WriteOperation(tag, encode, readModifyWrite);
 
@@ -209,7 +209,7 @@ namespace Logix.Tags
         /// <summary>
         /// Enqueue a write operation and wait synchronously for completion
         /// </summary>
-        public TagSnapshot EnqueueWriteSync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
+        public TagSnapshot EnqueueWriteSync(INativeTag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
             var task = EnqueueWriteAsync(tag, encode, readModifyWrite);
             return task.GetAwaiter().GetResult();
@@ -361,7 +361,7 @@ namespace Logix.Tags
             });
         }
 
-        private void ReleaseTag(Tag tag)
+        private void ReleaseTag(INativeTag tag)
         {
             List<QueuedOperation>? parked;
             lock (tagStateLock)
@@ -404,7 +404,7 @@ namespace Logix.Tags
             }
         }
 
-        private static (Type Kind, Tag Tag) OperationKey(QueuedOperation operation) => (operation.GetType(), operation.Tag);
+        private static (Type Kind, INativeTag Tag) OperationKey(QueuedOperation operation) => (operation.GetType(), operation.Tag);
 
         private async Task ProcessOperation(QueuedOperation operation, CancellationToken cancel)
         {

@@ -92,7 +92,7 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            Tag? tag = null;
+            INativeTag? tag = null;
             try
             {
                 (var definition, tag, var offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
@@ -120,7 +120,7 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            Tag? tag = null;
+            INativeTag? tag = null;
             try
             {
                 (var definition, tag, var offset) = await GetTagAsync(tagName).ConfigureAwait(false);
@@ -148,7 +148,7 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            Tag? tag = null;
+            INativeTag? tag = null;
             try
             {
                 (var definition, tag, var offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
@@ -177,7 +177,7 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            Tag? tag = null;
+            INativeTag? tag = null;
             try
             {
                 (var definition, tag, var offset) = await GetTagAsync(tagName).ConfigureAwait(false);
@@ -201,7 +201,7 @@ namespace Logix.Driver
             }
         }
 
-        private static bool CheckTagIsDisconnected(Tag tag, string msg = "")
+        private static bool CheckTagIsDisconnected(INativeTag tag, string msg = "")
         {
             var status = tag.GetStatus() switch
             {
@@ -219,7 +219,7 @@ namespace Logix.Driver
 
         /// <returns>The definition, its libplctag tag, and the offset to resolve the value at
         /// (a bit offset for BOOL array elements, otherwise 0)</returns>
-        private async Task<(TagDefinition, Tag, int)> GetTagAsync(string tagPath)
+        private async Task<(TagDefinition, INativeTag, int)> GetTagAsync(string tagPath)
         {
             if (!metaProvider.TryGetTagDefinition(tagPath, out var definition) || definition!.ExpansionLevel != ExpansionLevel.Deep)
                 definition = await metaProvider.LoadTagDefinitionAsync(tagPath).ConfigureAwait(false);

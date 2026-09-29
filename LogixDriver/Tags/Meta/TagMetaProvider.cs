@@ -25,10 +25,6 @@ namespace Logix.Tags
         // so concurrent loads of the same root would duplicate PLC reads and clobber Children.
         private readonly SemaphoreSlim loadGate = new(1, 1);
 
-        public TagMetaProvider(ITagFactory tagFactory)
-          : this(new TagValueReader(tagFactory), new TagDefinitionCache())
-        { }
-
         public TagMetaProvider(
             ITagValueReader reader, 
             ITagDefinitionCache tagCache,
@@ -147,8 +143,8 @@ namespace Logix.Tags
 
         private async Task<IEnumerable<TagDefinition>> ReadAndFilterBaseTags()
         {
-            var tag = await reader.ReadTagAsync("@tags").ConfigureAwait(false);
-            return metaDecoder.DecodeTagList(tag!)
+            var data = await reader.ReadRawAsync("@tags").ConfigureAwait(false);
+            return metaDecoder.DecodeTagList(data)
                 .Where(tag => tag.Name.StartsWith("Program:") || !IsSystem(tag.TypeCode));
         }
 

@@ -24,7 +24,7 @@ namespace Logix.Driver
         private readonly TimeSpan heartbeatInterval;
         private readonly TimeSpan probeTimeout;
         private readonly ITagValueChannel channel;
-        private readonly Func<Tag> probeTagFactory;
+        private readonly Func<INativeTag> probeTagFactory;
         private readonly Action<bool> onStateChanged;
 
         private readonly SemaphoreSlim probeGate = new(1, 1);
@@ -34,7 +34,7 @@ namespace Logix.Driver
         private bool disposed;
 
         // guarded by probeGate
-        private Tag? probeTag;
+        private INativeTag? probeTag;
         private int failedAttempts;
 
         // Environment.TickCount64 of the next reconnect attempt; written under probeGate, read by the loop
@@ -51,7 +51,7 @@ namespace Logix.Driver
             TimeSpan heartbeatInterval,
             TimeSpan probeTimeout,
             ITagValueChannel channel,
-            Func<Tag> probeTagFactory,
+            Func<INativeTag> probeTagFactory,
             Action<bool> onStateChanged)
         {
             this.heartbeatInterval = heartbeatInterval;
@@ -173,7 +173,7 @@ namespace Logix.Driver
 
         private async Task<string> ReadControllerInfoAsync(CancellationToken ct)
         {
-            Tag? tag = null;
+            INativeTag? tag = null;
             Task? probe = null;
             try
             {
@@ -182,7 +182,7 @@ namespace Logix.Driver
 
                 // bounded so a hung op can't stall monitoring; the op itself is still bounded by the tag timeout
                 await probe.WaitAsync(probeTimeout, ct).ConfigureAwait(false);
-                return TagMetaDecoder.DecodeControllerInfo(tag);
+                return TagMetaDecoder.DecodeControllerInfo(tag.GetBuffer());
             }
             catch (Exception ex)
             {
@@ -204,13 +204,12 @@ namespace Logix.Driver
             }
         }
 
-        private async Task WriteProbeAsync(Tag tag)
+        private async Task WriteProbeAsync(INativeTag tag)
         {
             if (!tag.IsInitialized)
                 await channel.Writer.InitializeAsync(tag).ConfigureAwait(false);
 
             // Set outside the queue: only the monitor uses this tag, and probes are serialized by probeGate.
-            tag.SetSize(ProbePayload.Length);
             tag.SetBuffer(ProbePayload);
 
             await channel.Writer.WriteTagAsync(tag).ConfigureAwait(false);

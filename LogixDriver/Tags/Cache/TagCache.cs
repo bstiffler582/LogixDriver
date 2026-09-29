@@ -5,7 +5,7 @@ namespace Logix.Tags
 {
     public interface ITagCache
     {
-        public Tag GetOrAdd(string tagPath, Func<Tag> factory);
+        public INativeTag GetOrAdd(string tagPath, Func<INativeTag> factory);
         public void Flush();
     }
 
@@ -13,14 +13,14 @@ namespace Logix.Tags
     {
         // Lazy ensures the factory runs once per path even when concurrent callers race on a miss,
         // so no orphaned native tag handles are created.
-        private readonly ConcurrentDictionary<string, Lazy<Tag>> tagCache = new();
+        private readonly ConcurrentDictionary<string, Lazy<INativeTag>> tagCache = new();
 
-        public Tag GetOrAdd(string tagPath, Func<Tag> factory)
+        public INativeTag GetOrAdd(string tagPath, Func<INativeTag> factory)
         {
             if (tagCache.TryGetValue(tagPath, out var cached))
                 return cached.Value;
 
-            return tagCache.GetOrAdd(tagPath, _ => new Lazy<Tag>(factory)).Value;
+            return tagCache.GetOrAdd(tagPath, _ => new Lazy<INativeTag>(factory)).Value;
         }
 
         public void Flush()

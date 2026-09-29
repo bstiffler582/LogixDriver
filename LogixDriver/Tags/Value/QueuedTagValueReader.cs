@@ -14,26 +14,20 @@ namespace Logix.Tags
             this.queue = queue;
         }
 
-        public async Task<byte[]> ReadBufferAsync(Tag tag)
+        public async Task<byte[]> ReadBufferAsync(INativeTag tag)
         {
             return (await queue.EnqueueReadAsync(tag).ConfigureAwait(false)).Buffer;
         }
 
-        public byte[] ReadBuffer(Tag tag)
+        public byte[] ReadBuffer(INativeTag tag)
         {
             return queue.EnqueueReadSync(tag).Buffer;
         }
 
-        public async Task<Tag> ReadTagAsync(string tagName, int elementCount = 1)
+        public async Task<byte[]> ReadRawAsync(string tagName, int elementCount = 1)
         {
-            var tag = tagFactory.Create(tagName, elementCount);
-            return (await queue.EnqueueReadAsync(tag).ConfigureAwait(false)).Tag;
-        }
-
-        public Tag ReadTag(string tagName, int elementCount = 1)
-        {
-            var tag = tagFactory.Create(tagName, elementCount);
-            return queue.EnqueueReadSync(tag).Tag;
+            using var tag = tagFactory.Create(tagName, elementCount);
+            return (await queue.EnqueueReadAsync(tag).ConfigureAwait(false)).Buffer;
         }
     }
 }
