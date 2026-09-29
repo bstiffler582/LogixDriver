@@ -69,7 +69,7 @@ namespace Logix.Driver
 
         public async Task LoadTagsAsync(IEnumerable<string>? tagFilter = null)
         {
-            await metaProvider.LoadTagDefinitionsAsync(tagFilter);
+            await metaProvider.LoadTagDefinitionsAsync(tagFilter).ConfigureAwait(false);
         }
 
         public void LoadTags(IEnumerable<string>? tagFilter = null)
@@ -92,16 +92,21 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            var (definition, tag, offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
-
+            Tag? tag = null;
             try
             {
+                (var definition, tag, var offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
                 var buffer = channel.Reader.ReadBuffer(tag);
                 return valueResolver.ResolveValue(buffer, definition, offset);
             }
+            catch (OperationCanceledException)
+            {
+                // the queue was flushed (connection lost) or disposed while this op waited
+                return null;
+            }
             catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag, ex.Message))
+                if (tag is not null && CheckTagIsDisconnected(tag, ex.Message))
                 {
                     monitor.RequestProbe();
                     return null;
@@ -115,16 +120,21 @@ namespace Logix.Driver
             if (!IsConnected)
                 return null;
 
-            var (definition, tag, offset) = await GetTagAsync(tagName);
-
+            Tag? tag = null;
             try
             {
-                var buffer = await channel.Reader.ReadBufferAsync(tag);
+                (var definition, tag, var offset) = await GetTagAsync(tagName).ConfigureAwait(false);
+                var buffer = await channel.Reader.ReadBufferAsync(tag).ConfigureAwait(false);
                 return valueResolver.ResolveValue(buffer, definition, offset);
+            }
+            catch (OperationCanceledException)
+            {
+                // the queue was flushed (connection lost) or disposed while this op waited
+                return null;
             }
             catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag, ex.Message))
+                if (tag is not null && CheckTagIsDisconnected(tag, ex.Message))
                 {
                     monitor.RequestProbe();
                     return null;
@@ -138,10 +148,10 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            var (definition, tag, offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
-
+            Tag? tag = null;
             try
             {
+                (var definition, tag, var offset) = GetTagAsync(tagName).GetAwaiter().GetResult();
                 if (!tag.IsInitialized)
                     tag = channel.Writer.Initialize(tag);
 
@@ -150,9 +160,13 @@ namespace Logix.Driver
                 channel.Writer.WriteTag(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset),
                     readModifyWrite: IsBoolArrayElement(tagName, definition));
             }
+            catch (OperationCanceledException)
+            {
+                // the queue was flushed (connection lost) or disposed, or a newer write to the tag superseded this one
+            }
             catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag, ex.Message))
+                if (tag is not null && CheckTagIsDisconnected(tag, ex.Message))
                     monitor.RequestProbe();
                 else throw;
             }
@@ -163,21 +177,25 @@ namespace Logix.Driver
             if (!IsConnected)
                 return;
 
-            var (definition, tag, offset) = await GetTagAsync(tagName);
-
+            Tag? tag = null;
             try
             {
+                (var definition, tag, var offset) = await GetTagAsync(tagName).ConfigureAwait(false);
                 if (!tag.IsInitialized)
-                    tag = await channel.Writer.InitializeAsync(tag);
+                    tag = await channel.Writer.InitializeAsync(tag).ConfigureAwait(false);
 
                 // encoding runs inside the queue under the per-tag lock, not against the shared tag here.
                 // A BOOL array element only changes one bit of its word, so the word is re-read first.
                 await channel.Writer.WriteTagAsync(tag, buffer => valueResolver.WriteTagBuffer(buffer, definition, value, offset),
-                    readModifyWrite: IsBoolArrayElement(tagName, definition));
+                    readModifyWrite: IsBoolArrayElement(tagName, definition)).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // the queue was flushed (connection lost) or disposed, or a newer write to the tag superseded this one
             }
             catch (Exception ex)
             {
-                if (CheckTagIsDisconnected(tag, ex.Message))
+                if (tag is not null && CheckTagIsDisconnected(tag, ex.Message))
                     monitor.RequestProbe();
                 else throw;
             }
@@ -204,7 +222,7 @@ namespace Logix.Driver
         private async Task<(TagDefinition, Tag, int)> GetTagAsync(string tagPath)
         {
             if (!metaProvider.TryGetTagDefinition(tagPath, out var definition) || definition!.ExpansionLevel != ExpansionLevel.Deep)
-                definition = await metaProvider.LoadTagDefinitionAsync(tagPath);
+                definition = await metaProvider.LoadTagDefinitionAsync(tagPath).ConfigureAwait(false);
 
             if (definition is null)
                 throw new KeyNotFoundException($"Unable to load tag definition for {tagPath}.");

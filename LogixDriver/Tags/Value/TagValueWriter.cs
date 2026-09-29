@@ -28,7 +28,7 @@ namespace Logix.Tags
         public async Task<Tag> InitializeAsync(Tag tag)
         {
             if (!tag.IsInitialized)
-                await tag.InitializeAsync();
+                await tag.InitializeAsync().ConfigureAwait(false);
 
             return tag;
         }
@@ -45,9 +45,9 @@ namespace Logix.Tags
         public async Task<Tag> WriteTagAsync(Tag tag, Action<byte[]>? encode = null, bool readModifyWrite = false)
         {
             if (readModifyWrite)
-                await tag.ReadAsync();
+                await tag.ReadAsync().ConfigureAwait(false);
             ApplyEncode(tag, encode);
-            await tag.WriteAsync();
+            await tag.WriteAsync().ConfigureAwait(false);
             return tag;
         }
 

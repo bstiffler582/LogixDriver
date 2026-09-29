@@ -25,7 +25,7 @@ namespace Logix.Tags
 
         public async Task<byte[]> ReadBufferAsync(Tag tag)
         {
-            await tag.ReadAsync();
+            await tag.ReadAsync().ConfigureAwait(false);
             return tag.GetBuffer();
         }
 
@@ -37,7 +37,7 @@ namespace Logix.Tags
         public async Task<Tag> ReadTagAsync(string tagName, int elementCount = 1)
         {
             var tag = tagFactory.Create(tagName, elementCount);
-            await tag.ReadAsync();
+            await tag.ReadAsync().ConfigureAwait(false);
             return tag;
         }
 

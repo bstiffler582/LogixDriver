@@ -38,7 +38,7 @@ namespace Logix.Tags
         /// <returns>The root node back</returns>
         public async Task<TagDefinition> ExpandTagDefinitionAsync(TagDefinition root, bool deep = true)
         {
-            await ExpandInternal(root, deep);
+            await ExpandInternal(root, deep).ConfigureAwait(false);
             return root;
         }
 
@@ -51,11 +51,11 @@ namespace Logix.Tags
                 return;
 
             if (IsArray(tagDef.TypeCode))
-                await ExpandArray(tagDef, deep);
+                await ExpandArray(tagDef, deep).ConfigureAwait(false);
             else if (IsUdt(tagDef.TypeCode))
-                await ExpandUdt(tagDef, deep);
+                await ExpandUdt(tagDef, deep).ConfigureAwait(false);
             else if (tagDef.Name.StartsWith("Program:"))
-                await ExpandProgram(tagDef, deep);
+                await ExpandProgram(tagDef, deep).ConfigureAwait(false);
             else
             {
                 ExpandPrimitive(tagDef);
@@ -70,7 +70,7 @@ namespace Logix.Tags
         {
             if (tagDef.ExpansionLevel == ExpansionLevel.None)
             {
-                var programMetaTag = await reader.ReadTagAsync($"{tagDef.Name}.@tags");
+                var programMetaTag = await reader.ReadTagAsync($"{tagDef.Name}.@tags").ConfigureAwait(false);
                 var progTagInfos = metaDecoder.DecodeTagList(programMetaTag!);
 
                 var programTags = progTagInfos
@@ -83,7 +83,7 @@ namespace Logix.Tags
             if (deep)
             {
                 foreach (var c in tagDef.Children!)
-                    await ExpandInternal(c, true);
+                    await ExpandInternal(c, true).ConfigureAwait(false);
             }
             
             tagDef.TypeName = tagDef.Name;
@@ -97,9 +97,21 @@ namespace Logix.Tags
                 return;
             }
 
+            // Already built by a shallow pass: deepen the existing elements in place. Rebuilding would
+            // swap in new nodes while the flat cache (first add wins) keeps serving the old ones.
+            if (tagDef.ExpansionLevel == ExpansionLevel.Shallow)
+            {
+                if (deep)
+                {
+                    foreach (var element in tagDef.Children!)
+                        await ExpandInternal(element, true).ConfigureAwait(false);
+                }
+                return;
+            }
+
             var baseTypeCode = GetArrayBaseType(tagDef.TypeCode);
             var baseTag = new TagDefinition(tagDef) { TypeCode = baseTypeCode };
-            await ExpandInternal(baseTag, deep);
+            await ExpandInternal(baseTag, deep).ConfigureAwait(false);
 
             var dims = tagDef.Dimensions?.Where(n => n > 0).ToArray();
             var arrayNode = BuildArrayType(tagDef, baseTag, dims, 0);
@@ -180,7 +192,7 @@ namespace Logix.Tags
                     typeDef = cached;
                 else
                 {
-                    var typeMetaTag = await reader.ReadTagAsync($"@udt/{udtId}");
+                    var typeMetaTag = await reader.ReadTagAsync($"@udt/{udtId}").ConfigureAwait(false);
                     typeDef = metaDecoder.DecodeUdtMeta(typeMetaTag!);
                 }
 
@@ -192,7 +204,7 @@ namespace Logix.Tags
                 if (deep)
                 {
                     foreach (var member in tagMembers!)
-                        await ExpandInternal(member, true);
+                        await ExpandInternal(member, true).ConfigureAwait(false);
                 }
 
                 if (cached is null)
@@ -206,7 +218,7 @@ namespace Logix.Tags
             if (deep && tagDef.ExpansionLevel == ExpansionLevel.Shallow)
             {
                 foreach (var child in tagDef.Children!)
-                    await ExpandInternal(child, true);
+                    await ExpandInternal(child, true).ConfigureAwait(false);
             }
         }
 

@@ -267,7 +267,7 @@ namespace Logix.Tags
                     // Take a slot before choosing the op, so each freed slot goes to the highest-priority
                     // op available at that moment. Ops are picked one at a time, so a steady stream of
                     // reads can't hold writes back until the read channel happens to drain.
-                    await globalConcurrency.WaitAsync(cancel);
+                    await globalConcurrency.WaitAsync(cancel).ConfigureAwait(false);
 
                     QueuedOperation? operation;
                     try
@@ -278,7 +278,7 @@ namespace Logix.Tags
                             writeWait ??= writeChannelReader.WaitToReadAsync(cancel).AsTask();
                             readWait ??= readChannelReader.WaitToReadAsync(cancel).AsTask();
 
-                            await Task.WhenAny(initWait, writeWait, readWait);
+                            await Task.WhenAny(initWait, writeWait, readWait).ConfigureAwait(false);
                             cancel.ThrowIfCancellationRequested();
 
                             if (initWait.IsCompleted) initWait = null;
@@ -351,7 +351,7 @@ namespace Logix.Tags
             {
                 try
                 {
-                    await ProcessOperation(operation, cancel);
+                    await ProcessOperation(operation, cancel).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -425,14 +425,14 @@ namespace Logix.Tags
                     // Buffer access happens here, while this op is the only one in flight for its tag,
                     // so reads can't be torn and a pending write's data can't be overwritten by a read.
                     case ReadOperation readOp:
-                        await readOp.Tag.ReadAsync(cancel);
+                        await readOp.Tag.ReadAsync(cancel).ConfigureAwait(false);
                         MarkActivity();
                         readOp.CompletionSource.TrySetResult(new TagSnapshot(readOp.Tag, readOp.Tag.GetBuffer()));
                         break;
 
                     case InitializeOperation initOp:
                         if (!initOp.Tag.IsInitialized)
-                            await initOp.Tag.InitializeAsync(cancel);
+                            await initOp.Tag.InitializeAsync(cancel).ConfigureAwait(false);
                         MarkActivity();
                         initOp.CompletionSource.TrySetResult(new TagSnapshot(initOp.Tag, Array.Empty<byte>()));
                         break;
@@ -440,7 +440,7 @@ namespace Logix.Tags
                     case WriteOperation writeOp:
                         // same slot as the write, so no other op on this tag can land in between
                         if (writeOp.ReadModifyWrite)
-                            await writeOp.Tag.ReadAsync(cancel);
+                            await writeOp.Tag.ReadAsync(cancel).ConfigureAwait(false);
 
                         var written = Array.Empty<byte>();
                         if (writeOp.Encode is not null)
@@ -451,7 +451,7 @@ namespace Logix.Tags
                             writeOp.Encode(written);
                             writeOp.Tag.SetBuffer(written);
                         }
-                        await writeOp.Tag.WriteAsync(cancel);
+                        await writeOp.Tag.WriteAsync(cancel).ConfigureAwait(false);
                         MarkActivity();
                         writeOp.CompletionSource.TrySetResult(new TagSnapshot(writeOp.Tag, written));
                         break;

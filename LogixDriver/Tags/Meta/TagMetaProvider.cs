@@ -43,22 +43,22 @@ namespace Logix.Tags
 
         public async Task<IEnumerable<TagDefinition>> LoadTagDefinitionsAsync(IEnumerable<string>? tagNames = null)
         {
-            await loadGate.WaitAsync();
+            await loadGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                IEnumerable<TagDefinition>? tagDefinitions = await ReadAndFilterBaseTags();
+                IEnumerable<TagDefinition>? tagDefinitions = await ReadAndFilterBaseTags().ConfigureAwait(false);
 
                 // selective expansion
                 if (tagNames is not null && tagNames.Any())
                 {
                     foreach (var tagName in tagNames)
-                        await LoadTagDefinitionAsync(tagName, tagDefinitions);
+                        await LoadTagDefinitionAsync(tagName, tagDefinitions).ConfigureAwait(false);
                 }
                 else
                 {
                     foreach (var tag in tagDefinitions!)
                     {
-                        await definitionExpander!.ExpandTagDefinitionAsync(tag, true);
+                        await definitionExpander!.ExpandTagDefinitionAsync(tag, true).ConfigureAwait(false);
                         cache.AddTagDefinition(tag);
                     }
                 }
@@ -78,7 +78,7 @@ namespace Logix.Tags
 
         public async Task<TagDefinition> LoadTagDefinitionAsync(string tagName)
         {
-            await loadGate.WaitAsync();
+            await loadGate.WaitAsync().ConfigureAwait(false);
             try
             {
                 // another caller may have loaded this tag while we waited on the gate
@@ -88,14 +88,14 @@ namespace Logix.Tags
                 var loadedDefinitions = cache.GetTagDefinitions();
                 if (!loadedDefinitions.Any())
                 {
-                    var baseTags = await ReadAndFilterBaseTags();
+                    var baseTags = await ReadAndFilterBaseTags().ConfigureAwait(false);
                     foreach (var tag in baseTags)
                         cache.AddTagDefinition(tag);
 
                     loadedDefinitions = cache.GetTagDefinitions();
                 }
 
-                return await LoadTagDefinitionAsync(tagName, loadedDefinitions);
+                return await LoadTagDefinitionAsync(tagName, loadedDefinitions).ConfigureAwait(false);
             }
             finally
             {
@@ -130,14 +130,14 @@ namespace Logix.Tags
             {
                 var memberName = pathQueue.Dequeue();
                 if (tag.ExpansionLevel < ExpansionLevel.Shallow)
-                    await definitionExpander.ExpandTagDefinitionAsync(tag, false);
+                    await definitionExpander.ExpandTagDefinitionAsync(tag, false).ConfigureAwait(false);
                 tag = tag.Children?.FirstOrDefault(c => c.Name == memberName)
                     ?? throw new KeyNotFoundException($"Member '{memberName}' not found while resolving '{tagName}'.");
             }
 
             // primitives are expanded too so they get marked Deep; otherwise GetTag re-resolves them on every read
             if (tag.ExpansionLevel < ExpansionLevel.Deep)
-                await definitionExpander.ExpandTagDefinitionAsync(tag, true);
+                await definitionExpander.ExpandTagDefinitionAsync(tag, true).ConfigureAwait(false);
 
             // re-add root to flatten expanded children
             cache.AddTagDefinition(root);
@@ -147,7 +147,7 @@ namespace Logix.Tags
 
         private async Task<IEnumerable<TagDefinition>> ReadAndFilterBaseTags()
         {
-            var tag = await reader.ReadTagAsync("@tags");
+            var tag = await reader.ReadTagAsync("@tags").ConfigureAwait(false);
             return metaDecoder.DecodeTagList(tag!)
                 .Where(tag => tag.Name.StartsWith("Program:") || !IsSystem(tag.TypeCode));
         }

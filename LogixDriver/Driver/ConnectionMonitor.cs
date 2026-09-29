@@ -68,7 +68,7 @@ namespace Logix.Driver
         /// </summary>
         public async Task<bool> ProbeNowAsync(CancellationToken ct = default)
         {
-            var connected = await RunProbeAsync(ct);
+            var connected = await RunProbeAsync(ct).ConfigureAwait(false);
             EnsureLoopStarted();
             return connected;
         }
@@ -91,10 +91,10 @@ namespace Logix.Driver
             {
                 try
                 {
-                    await Task.Delay(CheckInterval, token);
+                    await Task.Delay(CheckInterval, token).ConfigureAwait(false);
 
                     if (IsProbeDue())
-                        await RunProbeAsync(token);
+                        await RunProbeAsync(token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -124,12 +124,12 @@ namespace Logix.Driver
 
         private async Task<bool> RunProbeAsync(CancellationToken ct)
         {
-            await probeGate.WaitAsync(ct);
+            await probeGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
                 forceProbe = false;
 
-                string info = await ReadControllerInfoAsync(ct);
+                string info = await ReadControllerInfoAsync(ct).ConfigureAwait(false);
                 bool nowConnected = !string.IsNullOrEmpty(info);
                 controllerInfo = info;
 
@@ -181,7 +181,7 @@ namespace Logix.Driver
                 probe = WriteProbeAsync(tag);
 
                 // bounded so a hung op can't stall monitoring; the op itself is still bounded by the tag timeout
-                await probe.WaitAsync(probeTimeout, ct);
+                await probe.WaitAsync(probeTimeout, ct).ConfigureAwait(false);
                 return TagMetaDecoder.DecodeControllerInfo(tag);
             }
             catch (Exception ex)
@@ -207,13 +207,13 @@ namespace Logix.Driver
         private async Task WriteProbeAsync(Tag tag)
         {
             if (!tag.IsInitialized)
-                await channel.Writer.InitializeAsync(tag);
+                await channel.Writer.InitializeAsync(tag).ConfigureAwait(false);
 
             // Set outside the queue: only the monitor uses this tag, and probes are serialized by probeGate.
             tag.SetSize(ProbePayload.Length);
             tag.SetBuffer(ProbePayload);
 
-            await channel.Writer.WriteTagAsync(tag);
+            await channel.Writer.WriteTagAsync(tag).ConfigureAwait(false);
         }
 
         public void Dispose()
