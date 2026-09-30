@@ -9,7 +9,7 @@
 
   <PropertyGroup>
     <PackageId>LogixDriver</PackageId>
-    <AssemblyVersion>0.1.7.3</AssemblyVersion>
+    <AssemblyVersion>0.1.8</AssemblyVersion>
     <Version>$(AssemblyVersion)</Version>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <PackageOutputPath>../release</PackageOutputPath>
