@@ -89,10 +89,12 @@ namespace LogixDriver.Tests
             Assert.True(((StructType)tags[1].Type.ElementType!).IsClosureResolved);
         }
 
-        [Fact]
-        public async Task UnfilteredLoadResolvesEverything()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task UnfilteredLoadResolvesEverything(bool emptyFilter)
         {
-            await directory.LoadAsync();
+            await directory.LoadAsync(emptyFilter ? Array.Empty<string>() : null);
 
             var loaded = directory.GetLoadedTags();
             var program = loaded.OfType<ProgramInfo>().Single();
@@ -169,6 +171,32 @@ namespace LogixDriver.Tests
         public async Task MalformedPathsThrowArgument(string path)
         {
             await Assert.ThrowsAsync<ArgumentException>(() => directory.ResolveAsync(path));
+        }
+
+        [Fact]
+        public async Task RefreshRereadsTagListsAndTemplates()
+        {
+            await directory.LoadAsync();
+            var before = await directory.ResolveAsync("Recipes[0]");
+
+            // the program changes: a new tag, and Step gains a member
+            plc.Tags(new TagEntry("Counter", 0xC4), new TagEntry("Added", 0xC4), new TagEntry("Recipes", OneDim | Recipe, new uint[] { 10 }));
+            plc.Template(StepId, "Step", 12,
+                new MemberEntry("Target", 0xC4, 0),
+                new MemberEntry("Time", 0xC4, 4),
+                new MemberEntry("Speed", 0xCA, 8));
+
+            await directory.LoadAsync();
+            Assert.DoesNotContain(directory.GetLoadedTags(), t => t.Name == "Added");
+
+            directory.Refresh();
+            await directory.LoadAsync();
+
+            Assert.Contains(directory.GetLoadedTags(), t => t.Name == "Added");
+            var after = await directory.ResolveAsync("Recipes[0].Step.Speed");
+            Assert.NotSame(before, await directory.ResolveAsync("Recipes[0]"));
+            Assert.Equal("REAL", after.Type.ElementType!.Name);
+            Assert.Equal(2, plc.ReadsOf(StepTemplate));
         }
 
         [Fact]

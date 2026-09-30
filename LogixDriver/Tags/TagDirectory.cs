@@ -31,7 +31,8 @@ namespace Logix.Tags
     {
         /// <summary>
         /// Reads the controller tag list and fully resolves the types of the given paths, for browsing.
-        /// A program name ("Program:Main") loads all of that program's tags. No paths resolves everything.
+        /// A program name ("Program:Main") loads all of that program's tags. No paths (null or empty)
+        /// resolves everything.
         /// </summary>
         Task LoadAsync(IEnumerable<string>? paths = null);
 
@@ -49,6 +50,12 @@ namespace Logix.Tags
         /// Types below each tag are loaded where <see cref="TypeRef.IsResolved"/> is true.
         /// </summary>
         IReadOnlyList<TagNode> GetLoadedTags();
+
+        /// <summary>
+        /// Forgets everything read so far (tag lists, types, resolved paths), so the next load or
+        /// resolve reads it again, e.g. after the controller program has been changed.
+        /// </summary>
+        void Refresh();
     }
 
     internal sealed class TagDirectory : ITagDirectory
@@ -73,10 +80,12 @@ namespace Logix.Tags
         {
             var controller = await GetTagListAsync(ControllerScope).ConfigureAwait(false);
 
-            var loads = paths is null
+            // an empty filter (e.g. an unset selector in configuration) means no filter
+            var filter = paths?.ToList();
+            var loads = filter is null || filter.Count == 0
                 ? controller.Tags.Select(t => types.ResolveClosureAsync(t.Type))
                     .Concat(controller.Programs.Select(LoadProgramAsync))
-                : paths.Select(path => IsProgramName(path) ? LoadProgramAsync(path) : ResolveAsync(path));
+                : filter.Select(path => IsProgramName(path) ? LoadProgramAsync(path) : ResolveAsync(path));
 
             await Task.WhenAll(loads).ConfigureAwait(false);
         }
@@ -93,6 +102,13 @@ namespace Logix.Tags
                     ? program with { Tags = list.Tags }
                     : node)
                 .ToList();
+        }
+
+        public void Refresh()
+        {
+            tagLists.Clear();
+            resolved.Clear();
+            types.Clear();
         }
 
         private async Task LoadProgramAsync(string program)
