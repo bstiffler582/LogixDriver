@@ -1,4 +1,3 @@
-using libplctag;
 using Logix.Tags;
 
 namespace Logix.Driver
@@ -8,236 +7,104 @@ namespace Logix.Driver
         public Target Target { get; }
         public bool IsConnected => monitor.IsConnected;
         public string ControllerInfo => monitor.ControllerInfo;
+        public ITagDirectory Tags { get; }
 
-        private readonly ITagValueChannel channel;
-
-        private readonly ITagCache tagCache;
-        private readonly ITagMetaProvider metaProvider;
+        private readonly ITagChannel channel;
         private readonly ITagValueResolver valueResolver;
-        private readonly ITagFactory tagFactory;
         private readonly ConnectionMonitor monitor;
 
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
 
-        public Driver(
-            Target target,
-            ITagValueResolver valueResolver,
-            ITagCache tagCache,
-            ITagMetaProvider metaProvider,
-            ITagValueChannel channel,
-            ITagFactory tagFactory)
+        public Driver(Target target, ITagValueResolver valueResolver, ITagDirectory tags, ITagChannel channel)
         {
             Target = target;
+            Tags = tags;
             this.valueResolver = valueResolver;
-            this.tagCache = tagCache;
-            this.metaProvider = metaProvider;
             this.channel = channel;
-            this.tagFactory = tagFactory;
 
             monitor = new ConnectionMonitor(
                 target.HeartbeatInterval,
+                // one timeout waiting behind in-flight ops for a slot, one for the probe itself
+                TimeSpan.FromMilliseconds(target.TimeoutMs * 2),
                 channel,
-                tagFactory.Create("@raw"),
                 connected => ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(connected)));
         }
 
-        public static Driver Create(Target target, ITagValueResolver? valueResolver = null)
+        public static Driver Create(Target target, ITagValueResolver? valueResolver = null) =>
+            Create(target, new TagFactory(target), valueResolver);
+
+        internal static Driver Create(Target target, ITagFactory tagFactory, ITagValueResolver? valueResolver = null)
         {
-            var tagFactory = new TagFactory(target);
-            var channel = new TagValueChannelFactory().Open(tagFactory);
-            return new Driver(
-                target,
-                valueResolver ?? new DefaultTagValueResolver(),
-                new TagCache(),
-                new TagMetaProvider(channel.Reader, new TagDefinitionCache()),
-                channel,
-                tagFactory
-            );
+            var channel = new TagChannel(tagFactory, target.MaxConcurrentOperations);
+            return new Driver(target, valueResolver ?? new DefaultTagValueResolver(), new TagDirectory(channel), channel);
         }
 
-        public Task<bool> TryConnectAsync(CancellationToken token = default)
-        {
-            return monitor.ProbeNowAsync(token);
-        }
+        public Task<bool> TryConnectAsync(CancellationToken token = default) => monitor.ProbeNowAsync(token);
 
-        public bool TryConnect()
-        {
-            return TryConnectAsync().GetAwaiter().GetResult();
-        }
+        public bool TryConnect() => TryConnectAsync().GetAwaiter().GetResult();
 
-        public async Task LoadTagsAsync(IEnumerable<string>? tagFilter = null)
-        {
-            await metaProvider.LoadTagDefinitionsAsync(tagFilter);
-        }
+        public Task LoadTagsAsync(IEnumerable<string>? tagFilter = null) => Tags.LoadAsync(tagFilter);
 
-        public void LoadTags(IEnumerable<string>? tagFilter = null)
-        {
-            LoadTagsAsync(tagFilter).GetAwaiter().GetResult();
-        }
+        public void LoadTags(IEnumerable<string>? tagFilter = null) => LoadTagsAsync(tagFilter).GetAwaiter().GetResult();
 
-        public IReadOnlyDictionary<string, TagDefinition> GetTagDefinitionsFlat()
-        {
-            return metaProvider.GetTagDefinitionsFlat();
-        }
-
-        public IEnumerable<TagDefinition> GetTagDefinitions()
-        {
-            return metaProvider.GetTagDefinitions();
-        }
-
-        public object? ReadTagValue(string tagName)
-        {
-            if (!IsConnected)
-                return null;
-
-            var (definition, tag) = GetTag(tagName);
-
-            try
-            {
-                tag = channel.Reader.ReadTag(tag);
-                return valueResolver.ResolveValue(tag, definition);
-            }
-            catch (Exception ex)
-            {
-                if (CheckTagIsDisconnected(tag, ex.Message))
-                {
-                    monitor.RequestProbe();
-                    return null;
-                }
-                else throw;
-            }
-        }
+        public object? ReadTagValue(string tagName) => ReadTagValueAsync(tagName).GetAwaiter().GetResult();
 
         public async Task<object?> ReadTagValueAsync(string tagName)
         {
             if (!IsConnected)
                 return null;
 
-            var (definition, tag) = GetTag(tagName);
-
             try
             {
-                tag = await channel.Reader.ReadTagAsync(tag);
-                return valueResolver.ResolveValue(tag, definition);
+                var resolved = await Tags.ResolveAsync(tagName).ConfigureAwait(false);
+                var buffer = await channel.ReadAsync(resolved.NativeName, resolved.ElementCount).ConfigureAwait(false);
+                return valueResolver.ResolveValue(buffer, resolved.Type, 0, resolved.BitOffset);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                if (CheckTagIsDisconnected(tag, ex.Message))
-                {
-                    monitor.RequestProbe();
-                    return null;
-                }
-                else throw;
+                // flushed (connection lost) or disposed while waiting to run
+                return null;
+            }
+            catch (NativeTagException ex) when (ex.IsConnectionError)
+            {
+                monitor.RequestProbe();
+                return null;
             }
         }
 
-        public void WriteTagValue(string tagName, object value)
-        {
-            if (!IsConnected)
-                return;
-
-            var (definition, tag) = GetTag(tagName);
-
-            try
-            {
-                if (!tag.IsInitialized)
-                    tag = channel.Writer.Initialize(tag);
-
-                valueResolver.WriteTagBuffer(tag, definition, value);
-                tag = channel.Writer.WriteTag(tag);
-            }
-            catch (Exception ex)
-            {
-                if (CheckTagIsDisconnected(tag, ex.Message))
-                    monitor.RequestProbe();
-                else throw;
-            }
-        }
+        public void WriteTagValue(string tagName, object value) => WriteTagValueAsync(tagName, value).GetAwaiter().GetResult();
 
         public async Task WriteTagValueAsync(string tagName, object value)
         {
             if (!IsConnected)
                 return;
 
-            var (definition, tag) = GetTag(tagName);
-
             try
             {
-                if (!tag.IsInitialized)
-                    tag = await channel.Writer.InitializeAsync(tag);
+                var resolved = await Tags.ResolveAsync(tagName).ConfigureAwait(false);
 
-                valueResolver.WriteTagBuffer(tag, definition, value);
-                tag = await channel.Writer.WriteTagAsync(tag);
+                // The channel keys native tags by (name, element count), so every spelling of a path, and
+                // all 32 bits of a BOOL array word, share one tag: concurrent writes to it are sent as one.
+                // A BOOL array element only changes one bit of its word, so the word is re-read first.
+                await channel.WriteAsync(
+                    resolved.NativeName,
+                    resolved.ElementCount,
+                    buffer => valueResolver.WriteTagBuffer(buffer, resolved.Type, value, 0, resolved.BitOffset),
+                    readModifyWrite: resolved.IsBitArrayElement).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                if (CheckTagIsDisconnected(tag, ex.Message))
-                    monitor.RequestProbe();
-                else throw;
+                // flushed (connection lost) or disposed while waiting to run
             }
-        }
-
-        private static bool CheckTagIsDisconnected(Tag tag, string msg = "")
-        {
-            var status = tag.GetStatus() switch
+            catch (NativeTagException ex) when (ex.IsConnectionError)
             {
-                Status.ErrorBadConnection => true,
-                Status.ErrorTimeout => true,
-                Status.ErrorWinsock => true,
-                Status.Pending => true,
-                _ => false
-            };
-
-            // observed condition where ErrorTimeout exception is thrown
-            // when tag status is unrelated (e.g. NotFound)
-            return (status || msg == "ErrorTimeout");
-        }
-
-        private (TagDefinition, Tag) GetTag(string tagPath)
-        {
-            if (!metaProvider.TryGetTagDefinition(tagPath, out var definition) || definition!.ExpansionLevel != ExpansionLevel.Deep)
-                definition = metaProvider.LoadTagDefinition(tagPath);
-
-            if (definition is null)
-                throw new KeyNotFoundException($"Unable to load tag definition for {tagPath}.");
-
-            if (!tagCache.TryGetTag(tagPath, out var tag))
-            {
-                if (definition!.IsArray)
-                {
-                    var readPath = ResolveArrayPath(tagPath, definition);
-                    tag = tagFactory.Create(readPath, definition.ElementCount());
-                }
-                else
-                {
-                    tag = tagFactory.Create(tagPath);
-                }
-                tagCache.AddTag(tagPath, tag);
+                monitor.RequestProbe();
             }
-
-            if (tag is null)
-                throw new Exception($"Unable to create tag {tagPath}.");
-
-            return (definition, tag);
-        }
-
-        private static string ResolveArrayPath(string tagName, TagDefinition definition)
-        {
-            var member = definition;
-            var path = tagName;
-            while (member is not null && member.IsArray)
-            {
-                path += "[0]";
-                member = member.Children?.First();
-            }
-
-            return path;
         }
 
         public void Dispose()
         {
             monitor.Dispose();
-            tagCache?.Flush();
             channel.Dispose();
         }
     }

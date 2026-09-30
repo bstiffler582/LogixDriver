@@ -1,166 +1,189 @@
-using libplctag;
+using System.Buffers.Binary;
+using System.Collections;
+using System.Text;
 using static Logix.Tags.TagMetaHelpers;
 
 namespace Logix.Tags
 {
+    /// <summary>
+    /// Base for value resolvers: primitive, string and array-element helpers. Subclasses decide
+    /// what values look like (e.g. plain CLR objects, or a host application's value type).
+    /// </summary>
     public abstract class TagValueResolverBase<T> : ITagValueResolver<T>
     {
         public Type ValueType => typeof(T);
-        public abstract T ResolveValue(Tag tag, TagDefinition definition, int offset = 0);
-        public abstract void WriteTagBuffer(Tag tag, TagDefinition definition, T value, int offset = 0);
-        object ITagValueResolver.ResolveValue(Tag tag, TagDefinition definition, int offset)
-            => ResolveValue(tag, definition, offset) ?? default!;
-        void ITagValueResolver.WriteTagBuffer(Tag tag, TagDefinition definition, object value, int offset)
-            => WriteTagBuffer(tag, definition, (T)value);
+        public abstract T ResolveValue(byte[] buffer, TypeRef type, int offset = 0, int bitOffset = 0);
+        public abstract void WriteTagBuffer(byte[] buffer, TypeRef type, T value, int offset = 0, int bitOffset = 0);
 
+        object ITagValueResolver.ResolveValue(byte[] buffer, TypeRef type, int offset, int bitOffset)
+            => ResolveValue(buffer, type, offset, bitOffset) ?? default!;
+        void ITagValueResolver.WriteTagBuffer(byte[] buffer, TypeRef type, object value, int offset, int bitOffset)
+            => WriteTagBuffer(buffer, type, (T)value, offset, bitOffset);
 
-        protected object PrimitiveValueResolver(Tag tag, ushort typeCode, int offset = 0)
+        /// <summary>
+        /// The elements along an array's first dimension, with their positions. For a
+        /// multi-dimensional array each element is itself an array (the remaining dimensions).
+        /// BOOL array elements are one bit each.
+        /// </summary>
+        protected static IEnumerable<(TypeRef Type, int Offset, int BitOffset)> Elements(TypeRef array, int offset, int bitOffset = 0)
         {
-            return (Code)(typeCode) switch
+            var element = array.Index(1);
+            var elementBits = array.IsBitArray ? 1 : Resolved(array).Size * 8;
+            var strideBits = elementBits * element.ElementCount;
+            var start = offset * 8 + bitOffset;
+
+            for (int i = 0; i < array.Dims[0]; i++)
             {
-                Code.BOOL => tag.GetBit(offset),
-                Code.SINT => tag.GetInt8(offset),
-                Code.USINT => tag.GetUInt8(offset),
-                Code.INT or Code.UINT or Code.WORD => tag.GetInt16(offset),
-                Code.DINT or Code.UDINT or Code.DWORD => tag.GetInt32(offset),
-                Code.LINT or Code.ULINT or Code.LWORD => tag.GetInt64(offset),
-                Code.REAL => tag.GetFloat32(offset),
-                Code.LREAL => tag.GetFloat64(offset),
-                Code.STRING or Code.STRING2 or Code.STRINGI or Code.STRINGN or Code.STRING_STRUCT
-                    => tag.GetString(offset),
-                _ => throw new Exception($"Primitive type code:{typeCode:X} not handled")
+                var position = start + i * strideBits;
+                yield return (element, position / 8, position % 8);
+            }
+        }
+
+        protected static LogixType Resolved(TypeRef type) =>
+            type.ElementType ?? throw new InvalidOperationException($"Type {type} hasn't been resolved.");
+
+        protected static object ReadPrimitive(byte[] buffer, PrimitiveType type, int offset, int bitOffset = 0)
+        {
+            var span = buffer.AsSpan(offset);
+            return type.Code switch
+            {
+                Code.BOOL => (buffer[offset + bitOffset / 8] & (1 << (bitOffset % 8))) != 0,
+                Code.SINT => (sbyte)buffer[offset],
+                Code.USINT => buffer[offset],
+                Code.INT => BinaryPrimitives.ReadInt16LittleEndian(span),
+                Code.UINT => BinaryPrimitives.ReadUInt16LittleEndian(span),
+                Code.DINT or Code.TIME => BinaryPrimitives.ReadInt32LittleEndian(span),
+                Code.UDINT => BinaryPrimitives.ReadUInt32LittleEndian(span),
+                Code.LINT or Code.DATE_AND_TIME => BinaryPrimitives.ReadInt64LittleEndian(span),
+                Code.ULINT => BinaryPrimitives.ReadUInt64LittleEndian(span),
+                Code.REAL => BinaryPrimitives.ReadSingleLittleEndian(span),
+                Code.LREAL => BinaryPrimitives.ReadDoubleLittleEndian(span),
+                _ => throw new NotSupportedException($"Type {type.Name} can't be read.")
             };
         }
 
-        protected void PrimitiveValueWriter(Tag tag, ushort typeCode, object value, int offset = 0)
+        // Convert (rather than unboxing) accepts any boxed numeric type, e.g. an int for a UINT;
+        // out-of-range values throw OverflowException instead of silently wrapping.
+        protected static void WritePrimitive(byte[] buffer, PrimitiveType type, object value, int offset, int bitOffset = 0)
         {
-            switch ((Code)typeCode)
+            var span = buffer.AsSpan(offset);
+            switch (type.Code)
             {
-                case Code.BOOL: 
-                    tag.SetBit(offset, (bool)value);
+                case Code.BOOL:
+                    // bitOffset may run past the first byte, e.g. bit 8..31 of a BOOL array word
+                    var index = offset + bitOffset / 8;
+                    var mask = (byte)(1 << (bitOffset % 8));
+                    buffer[index] = Convert.ToBoolean(value) ? (byte)(buffer[index] | mask) : (byte)(buffer[index] & ~mask);
                     break;
-                case Code.SINT:
-                    tag.SetInt8(offset, (sbyte)value);
-                    break;
-                case Code.USINT or Code.BYTE:
-                    tag.SetUInt8(offset, (byte)value);
-                    break;
-                case Code.INT:
-                    tag.SetInt16(offset, (short)value);
-                    break;
-                case Code.UINT or Code.WORD:
-                    tag.SetUInt16(offset, (ushort)value);
-                    break;
-                case Code.DINT:
-                    tag.SetInt32(offset, (int)value);
-                    break;
-                case Code.UDINT or Code.DWORD:
-                    tag.SetUInt32(offset, (uint)value);
-                    break;
-                case Code.LINT:
-                    tag.SetInt64(offset, (long)value);
-                    break;
-                case Code.ULINT or Code.LWORD:
-                    tag.SetUInt64(offset, (ulong)value);
-                    break;
-                case Code.REAL:
-                    tag.SetFloat32(offset, (float)value);
-                    break;
-                case Code.LREAL:
-                    tag.SetFloat64(offset, (double)value);
-                    break;
-                case Code.STRING or Code.STRING2 or Code.STRINGI or Code.STRINGN or Code.STRING_STRUCT:
-                    tag.SetString(offset, (string)value);
-                    break;
-                default:
-                    throw new Exception($"No primitive type resolver for TypeCode {typeCode}");
+                case Code.SINT: buffer[offset] = unchecked((byte)Convert.ToSByte(value)); break;
+                case Code.USINT: buffer[offset] = Convert.ToByte(value); break;
+                case Code.INT: BinaryPrimitives.WriteInt16LittleEndian(span, Convert.ToInt16(value)); break;
+                case Code.UINT: BinaryPrimitives.WriteUInt16LittleEndian(span, Convert.ToUInt16(value)); break;
+                case Code.DINT or Code.TIME: BinaryPrimitives.WriteInt32LittleEndian(span, Convert.ToInt32(value)); break;
+                case Code.UDINT: BinaryPrimitives.WriteUInt32LittleEndian(span, Convert.ToUInt32(value)); break;
+                case Code.LINT or Code.DATE_AND_TIME: BinaryPrimitives.WriteInt64LittleEndian(span, Convert.ToInt64(value)); break;
+                case Code.ULINT: BinaryPrimitives.WriteUInt64LittleEndian(span, Convert.ToUInt64(value)); break;
+                case Code.REAL: BinaryPrimitives.WriteSingleLittleEndian(span, Convert.ToSingle(value)); break;
+                case Code.LREAL: BinaryPrimitives.WriteDoubleLittleEndian(span, Convert.ToDouble(value)); break;
+                default: throw new NotSupportedException($"Type {type.Name} can't be written.");
             }
+        }
+
+        protected static string ReadString(byte[] buffer, StringType type, int offset)
+        {
+            var count = BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(offset));
+            var available = Math.Max(0, Math.Min(type.Capacity, buffer.Length - offset - StringType.LengthBytes));
+            return Encoding.Latin1.GetString(buffer, offset + StringType.LengthBytes, Math.Clamp(count, 0, available));
+        }
+
+        protected static void WriteString(byte[] buffer, StringType type, string value, int offset)
+        {
+            var data = buffer.AsSpan(offset + StringType.LengthBytes,
+                Math.Max(0, Math.Min(type.Capacity, buffer.Length - offset - StringType.LengthBytes)));
+
+            if (value.Length > data.Length)
+                throw new ArgumentException($"String length {value.Length} exceeds {type.Name} capacity {data.Length}.");
+
+            data.Clear();
+            var written = Encoding.Latin1.GetBytes(value, data);
+            BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(offset), written);
         }
     }
 
+    /// <summary>
+    /// Plain CLR values: primitives as their .NET types, strings as string, arrays as
+    /// List&lt;object&gt; (nested per dimension), structures as Dictionary&lt;string, object&gt;.
+    /// </summary>
     public class DefaultTagValueResolver : TagValueResolverBase<object>
     {
-        public override object ResolveValue(Tag tag, TagDefinition definition, int offset = 0)
+        public override object ResolveValue(byte[] buffer, TypeRef type, int offset = 0, int bitOffset = 0)
         {
-            if (IsArray(definition.TypeCode))
+            if (type.IsArray)
+                return Elements(type, offset, bitOffset)
+                    .Select(e => ResolveValue(buffer, e.Type, e.Offset, e.BitOffset))
+                    .ToList();
+
+            return Resolved(type) switch
             {
-                if (definition.Children is null || definition.Children.Count < 1)
-                    return 0;
+                PrimitiveType primitive => ReadPrimitive(buffer, primitive, offset, bitOffset),
+                StringType stringType => ReadString(buffer, stringType, offset),
+                StructType structType => structType.Members.ToDictionary(
+                    m => m.Name,
+                    m => ResolveValue(buffer, m.Type, offset + m.Offset, m.BitOffset)),
+                var other => throw new NotSupportedException($"Type {other.Name} can't be read.")
+            };
+        }
 
-                var ret = new List<object>();
-                foreach (var m in definition.Children)
-                    ret.Add(ResolveValue(tag, m, offset + (int)m.Offset));
+        public override void WriteTagBuffer(byte[] buffer, TypeRef type, object value, int offset = 0, int bitOffset = 0)
+        {
+            if (type.IsArray)
+            {
+                // any sequence works: arrays, List<object> (what ResolveValue returns), List<int>, etc.
+                if (value is string || value is not IEnumerable sequence)
+                    throw new ArgumentException($"Write value for {type} must be a sequence, got {value.GetType().Name}.");
 
-                return ret;
+                var items = sequence.Cast<object>().ToArray();
+                if (items.Length != type.Dims[0])
+                    throw new ArgumentException($"Write value for {type} has {items.Length} elements, expected {type.Dims[0]}.");
+
+                var i = 0;
+                foreach (var element in Elements(type, offset, bitOffset))
+                    WriteTagBuffer(buffer, element.Type, items[i++], element.Offset, element.BitOffset);
+                return;
             }
-            else if (IsUdt(definition.TypeCode) && !definition.TypeName.Contains("STRING"))
-            {
-                if (definition.Children is null || definition.Children.Count < 1)
-                    return 0;
 
-                var ret = new Dictionary<string, object>();
-                foreach (var c in definition.Children)
-                {
-                    if (c.TypeCode == (ushort)Code.BOOL)
-                        ret[c.Name] = ResolveValue(tag, c, ((offset + (int)c.Offset) * 8) + (int)c.BitOffset);
-                    else
-                        ret[c.Name] = ResolveValue(tag, c, offset + (int)c.Offset);
-                }
-
-                return ret;
-            }
-            else
+            switch (Resolved(type))
             {
-                return PrimitiveValueResolver(tag, definition.TypeCode, offset);
+                case PrimitiveType primitive:
+                    WritePrimitive(buffer, primitive, value, offset, bitOffset);
+                    break;
+                case StringType stringType:
+                    WriteString(buffer, stringType, value as string ?? throw new ArgumentException($"Write value for {stringType.Name} must be a string."), offset);
+                    break;
+                case StructType structType:
+                    foreach (var m in structType.Members)
+                    {
+                        // every member is required; a skipped member would write back whatever was last read
+                        if (!TryGetMemberValue(value, m.Name, out var memberValue))
+                            throw new ArgumentException($"Write value for {structType.Name} is missing member '{m.Name}'.");
+                        WriteTagBuffer(buffer, m.Type, memberValue!, offset + m.Offset, m.BitOffset);
+                    }
+                    break;
+                case var other:
+                    throw new NotSupportedException($"Type {other.Name} can't be written.");
             }
         }
 
-        public override void WriteTagBuffer(Tag tag, TagDefinition definition, object value, int offset = 0)
+        // accepts Dictionary<string, object> (what ResolveValue returns), ExpandoObject, or any other dictionary keyed by string
+        private static bool TryGetMemberValue(object value, string name, out object? memberValue)
         {
-            if (IsArray(definition.TypeCode))
-            {
-                if (definition.Children is null || definition.Children.Count < 1)
-                    return;
+            memberValue = null;
+            if (value is IDictionary<string, object> generic)
+                return generic.TryGetValue(name, out memberValue) && memberValue is not null;
+            if (value is IDictionary nonGeneric)
+                return nonGeneric.Contains(name) && (memberValue = nonGeneric[name]) is not null;
 
-                // cast object value to array
-                object[]? arr = null;
-                if (value.GetType() == typeof(IEnumerable<>))
-                    arr = (value as IEnumerable<object>)?.ToArray();
-                else if (value is Array genericArray)
-                    arr = genericArray.Cast<object>().ToArray();
-
-                if (arr is null) throw new Exception($"Unable to cast write value for array tag {tag.Name} to Enumerable.");
-
-                foreach (var c in definition.Children)
-                {
-                    {
-                        int.TryParse(c.Name, out var i);
-                        WriteTagBuffer(tag, c, arr[i], offset + (int)c.Offset);
-                    }
-                }
-            }
-            else if (IsUdt(definition.TypeCode) && !definition.TypeName.Contains("STRING"))
-            {
-                if (definition.Children is null || definition.Children.Count < 1)
-                    return;
-
-                if (value.GetType() == typeof(IDictionary<string, object>))
-                {
-                    var dict = value as IDictionary<string, object>;
-                    if (dict is null) throw new Exception($"Unable to cast write value for tag {tag.Name} to Dictionary.");
-                    foreach (var c in definition.Children)
-                    {
-                        if (c.TypeCode == (ushort)Code.BOOL)
-                            WriteTagBuffer(tag, c, dict[c.Name], ((offset + (int)c.Offset) * 8) + (int)c.BitOffset);
-                        else
-                            WriteTagBuffer(tag, c, dict[c.Name], offset + (int)c.Offset);
-                    }
-                }
-            }
-            else
-            {
-                PrimitiveValueWriter(tag, definition.TypeCode, value, offset);
-            }
+            throw new ArgumentException($"Write value for a structure must be a dictionary keyed by member name, got {value.GetType().Name}.");
         }
     }
 }

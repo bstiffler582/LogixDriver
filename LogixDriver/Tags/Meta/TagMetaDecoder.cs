@@ -1,128 +1,105 @@
-﻿using libplctag;
-using static Logix.Tags.TagMetaHelpers;
+using System.Buffers.Binary;
 using System.Text;
 
 namespace Logix.Tags
 {
-    public interface ITagMetaDecoder
+    /// <summary>One entry of an @tags (or Program:X.@tags) response.</summary>
+    internal record TagListEntry(string Name, ushort Type, uint[] Dims);
+
+    /// <summary>A decoded @udt/{id} template, before any interpretation.</summary>
+    internal record UdtTemplate(ushort Id, string Name, uint Size, IReadOnlyList<UdtTemplateMember> Members);
+
+    /// <param name="Info">bit number for BOOL members, element count for array members</param>
+    internal record UdtTemplateMember(string Name, ushort Type, uint Offset, ushort Info);
+
+    internal interface ITagMetaDecoder
     {
-        public TagDefinition DecodeTagMeta(Tag tag, int offset, out int elementSize);
-        public TypeDefinition DecodeUdtMeta(Tag tag);
-        public IEnumerable<TagDefinition> DecodeTagList(Tag tag);
+        IReadOnlyList<TagListEntry> DecodeTagList(byte[] data);
+        UdtTemplate DecodeUdtMeta(byte[] data);
     }
 
     internal class TagMetaDecoder : ITagMetaDecoder
     {
-        public IEnumerable<TagDefinition> DecodeTagList(Tag tag)
+        // @tags entry: instance id (4), type (2), element length (2), 3 dimensions (4 each),
+        // name length (2), then the name bytes
+        private const int TagEntryHeaderSize = 22;
+        private const int MaxTagNameLength = 399;
+
+        public IReadOnlyList<TagListEntry> DecodeTagList(byte[] data)
         {
-            var tagList = new List<TagDefinition>();
-            var tagSize = tag.GetSize();
+            var tagList = new List<TagListEntry>();
+            var span = data.AsSpan();
 
             int offset = 0;
-            while (offset < tagSize)
+            while (offset + TagEntryHeaderSize <= span.Length)
             {
-                var tagDef = DecodeTagMeta(tag, offset, out int elementSize);
-                tagList.Add(tagDef);
-                offset += elementSize;
+                var entry = span[offset..];
+                var type = BinaryPrimitives.ReadUInt16LittleEndian(entry[4..]);
+                var dims = new uint[]
+                {
+                    BinaryPrimitives.ReadUInt32LittleEndian(entry[8..]),
+                    BinaryPrimitives.ReadUInt32LittleEndian(entry[12..]),
+                    BinaryPrimitives.ReadUInt32LittleEndian(entry[16..])
+                };
+                var nameLength = Math.Min((int)BinaryPrimitives.ReadUInt16LittleEndian(entry[20..]), MaxTagNameLength);
+                nameLength = Math.Min(nameLength, entry.Length - TagEntryHeaderSize);
+                var name = Encoding.ASCII.GetString(entry.Slice(TagEntryHeaderSize, nameLength));
+
+                tagList.Add(new TagListEntry(name, type, dims));
+                offset += TagEntryHeaderSize + nameLength;
             }
 
             return tagList;
         }
 
-        public TagDefinition DecodeTagMeta(Tag tag, int offset, out int elementSize)
+        // Template layout: id (2), member description size (4), instance size (4), member count (2),
+        // handle (2), then 8 bytes per member (info (2), type (2), offset (4)), then the template
+        // name ("Name;..."), then each member name, all null-terminated.
+        public UdtTemplate DecodeUdtMeta(byte[] data)
         {
-            var tagInstanceId = tag.GetUInt32(offset);
-            var tagType = tag.GetUInt16(offset + 4);
-            var tagLength = tag.GetUInt16(offset + 6);
-            var tagArrayDims = new uint[]
+            var span = data.AsSpan();
+            var templateId = BinaryPrimitives.ReadUInt16LittleEndian(span);
+            var instanceSize = BinaryPrimitives.ReadUInt32LittleEndian(span[6..]);
+            var memberCount = BinaryPrimitives.ReadUInt16LittleEndian(span[10..]);
+
+            const int headerSize = 14;
+            const int memberInfoSize = 8;
+
+            var fields = new (ushort Info, ushort Type, uint Offset)[memberCount];
+            for (int i = 0; i < memberCount; i++)
             {
-                tag.GetUInt32(offset + 8),
-                tag.GetUInt32(offset + 12),
-                tag.GetUInt32(offset + 16)
-            };
-
-            const int TAG_STRING_SIZE = 200;
-            var apparentTagNameLength = (int)tag.GetUInt16(offset + 20);
-            var actualTagNameLength = Math.Min(apparentTagNameLength, TAG_STRING_SIZE * 2 - 1);
-
-            var tagNameBytes = Enumerable.Range(offset + 22, actualTagNameLength)
-                .Select(o => tag.GetUInt8(o))
-                .Select(Convert.ToByte)
-                .ToArray();
-
-            var tagName = Encoding.ASCII.GetString(tagNameBytes);
-
-            elementSize = 22 + actualTagNameLength;
-
-            return new TagDefinition(tagName, tagType, tagLength, (uint)offset, 0, ResolveTypeName(tagType), tagArrayDims);
-        }
-
-        public TypeDefinition DecodeUdtMeta(Tag tag)
-        {
-            var template_id = tag.GetUInt16(0);
-            var member_desc_size = tag.GetUInt32(2);
-            var udt_instance_size = tag.GetUInt32(6);
-            var num_members = tag.GetUInt16(10);
-            var struct_handle = tag.GetUInt16(12);
-
-            var udtInfo = new UdtInfo()
-            {
-                Fields = new UdtFieldInfo[num_members],
-                NumFields = num_members,
-                Handle = struct_handle,
-                Id = template_id,
-                Size = udt_instance_size
-            };
-
-            var offset = 14;
-
-            for (int field_index = 0; field_index < num_members; field_index++)
-            {
-                ushort field_metadata = tag.GetUInt16(offset);
-                offset += 2;
-
-                ushort field_element_type = tag.GetUInt16(offset);
-                offset += 2;
-
-                ushort field_offset = tag.GetUInt16(offset);
-                offset += 4;
-
-                var field = new UdtFieldInfo()
-                {
-                    Offset = field_offset,
-                    Metadata = field_metadata,
-                    Type = field_element_type,
-                };
-
-                udtInfo.Fields[field_index] = field;
+                var member = span[(headerSize + i * memberInfoSize)..];
+                fields[i] = (
+                    BinaryPrimitives.ReadUInt16LittleEndian(member),
+                    BinaryPrimitives.ReadUInt16LittleEndian(member[2..]),
+                    BinaryPrimitives.ReadUInt32LittleEndian(member[4..]));
             }
 
-            var name_str = tag.GetString(offset).Split(';')[0];
-            udtInfo.Name = name_str;
+            var names = ReadNullTerminatedStrings(span[(headerSize + memberCount * memberInfoSize)..], memberCount + 1);
+            var templateName = names[0].Split(';')[0];
 
-            offset += tag.GetStringTotalLength(offset);
+            var members = fields
+                .Select((f, i) => new UdtTemplateMember(names[i + 1], f.Type, f.Offset, f.Info))
+                .ToList();
 
-            for (int field_index = 0; field_index < num_members; field_index++)
-            {
-                udtInfo.Fields[field_index].Name = tag.GetString(offset);
-                offset += tag.GetStringTotalLength(offset);
-            }
-
-            var members = udtInfo.Fields.Select(m =>
-            {
-                var bitOffset = (m.Type == (ushort)Code.BOOL) ? m.Metadata : 0;
-                var dimension = IsArray(m.Type) ? m.Metadata : 0;
-                return new TypeMemberDefinition(m.Type, m.Name, m.Offset, (ushort)dimension, (ushort)bitOffset);
-            })
-            .ToList();
-
-            return new TypeDefinition(udtInfo.Id, udtInfo.Size, udtInfo.Name, members);
+            return new UdtTemplate(templateId, templateName, instanceSize, members);
         }
 
-        public static string DecodeControllerInfo(Tag tag)
+        private static string[] ReadNullTerminatedStrings(ReadOnlySpan<byte> data, int count)
         {
-            var buffer = tag.GetBuffer();
+            var strings = new string[count];
+            for (int i = 0; i < count; i++)
+            {
+                var end = data.IndexOf((byte)0);
+                if (end < 0) end = data.Length;
+                strings[i] = Encoding.ASCII.GetString(data[..end]);
+                data = end < data.Length ? data[(end + 1)..] : ReadOnlySpan<byte>.Empty;
+            }
+            return strings;
+        }
 
+        public static string DecodeControllerInfo(byte[] buffer)
+        {
             var offset = 10;
             var major = buffer[offset].ToString();
             offset += 1;
@@ -132,22 +109,5 @@ namespace Logix.Tags
 
             return $"{model} v{major}.{minor}";
         }
-    }
-    internal class UdtFieldInfo
-    {
-        public string Name { get; set; } = "";
-        public ushort Type { get; set; }
-        public ushort Metadata { get; set; }
-        public uint Offset { get; set; }
-    }
-
-    internal class UdtInfo
-    {
-        public uint Size { get; set; }
-        public string Name { get; set; } = "";
-        public ushort Id { get; set; }
-        public ushort NumFields { get; set; }
-        public ushort Handle { get; set; }
-        public UdtFieldInfo[] Fields { get; set; } = new UdtFieldInfo[0];
     }
 }

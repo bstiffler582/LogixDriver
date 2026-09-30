@@ -11,10 +11,17 @@ namespace Logix.Driver
         public int TimeoutMs { get; set; } = 5000;
 
         /// <summary>
-        /// Interval between background heartbeat probes used to detect connection loss while idle.
-        /// <see cref="TimeSpan.Zero"/> disables the heartbeat; loss is then only detected during reads/writes.
+        /// Idle time after which a heartbeat probe checks the connection while no traffic is succeeding.
+        /// <see cref="TimeSpan.Zero"/> disables heartbeats; loss is then only detected by failed reads/writes.
+        /// Reconnect attempts run regardless once TryConnect has been called.
         /// </summary>
         public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.Zero;
+
+        /// <summary>
+        /// Most operations in flight against the controller at once. Queued writes always go before
+        /// queued reads. Higher values let libplctag pack more requests per round trip.
+        /// </summary>
+        public int MaxConcurrentOperations { get; set; } = 8;
 
         public Target(
             string name,

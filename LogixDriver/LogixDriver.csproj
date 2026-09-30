@@ -9,7 +9,7 @@
 
   <PropertyGroup>
     <PackageId>LogixDriver</PackageId>
-    <AssemblyVersion>0.1.6</AssemblyVersion>
+    <AssemblyVersion>0.1.8</AssemblyVersion>
     <Version>$(AssemblyVersion)</Version>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <PackageOutputPath>../release</PackageOutputPath>
@@ -40,6 +40,10 @@
 
   <ItemGroup>
     <PackageReference Include="libplctag" Version="1.5.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="LogixDriver.Tests" />
   </ItemGroup>
 
 </Project>
