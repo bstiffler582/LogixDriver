@@ -78,7 +78,7 @@ await driver.LoadTagsAsync([ "Program:HMI_A.MyHmiUdt" ]);
 
 Tags can be read and written with no preceding `LoadTags`/`LoadTagsAsync`. A path resolves on first use, reading only the types along it (plus the target's own types), and the result is cached.
 
-### Read/write a tag values
+### Read/write tag values
 
 ```csharp
 using System.Text.Json;
@@ -115,4 +115,8 @@ if (await driver.TryConnectAsync())
 }
 ```
 
-By default, complex types are resolved to `Dictionary<string, object>` for UDTs and `List<object>` for arrays. It is possible to create your own value resolver by inheriting from the `TagResolverBase` class and injecting it into the `Driver.Create` method.
+By default, complex types are resolved to `Dictionary<string, object>` for UDTs and `List<object>` for arrays. It is possible to create your own value resolver by inheriting from the `TagValueResolverBase<T>` class and injecting it into the `Driver.Create` method. See [Custom value resolvers](https://github.com/bstiffler582/LogixDriver/blob/master/Documentation/06-errors-and-extensibility.md#custom-value-resolvers) for details.
+
+## Documentation
+
+For a detailed walkthrough of how the driver works internally (type resolution, reading, writing, connection monitoring, concurrency and error handling), see the [documentation index](https://github.com/bstiffler582/LogixDriver/blob/master/Documentation/README.md).
